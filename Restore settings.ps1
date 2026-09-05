@@ -7,9 +7,9 @@
 Write-Host "`n========== REVERT SIGMA PERFORMANCES ==========" -ForegroundColor Green
 Write-Host ""
 Write-Host "[WARNING] This will RESTORE DEFAULT power settings." -ForegroundColor Yellow
-Write-Host " - Re‑enables all power saving features" -ForegroundColor Yellow
-Write-Host " - Re‑enables hibernation" -ForegroundColor Yellow
-Write-Host " - Re‑enables dynamic tick" -ForegroundColor Yellow
+Write-Host " - Re-enables all power saving features" -ForegroundColor Yellow
+Write-Host " - Re-enables hibernation" -ForegroundColor Yellow
+Write-Host " - Re-enables dynamic tick" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Any custom power plan customizations you had before will be lost." -ForegroundColor Red
 Write-Host ""
@@ -39,7 +39,7 @@ if ($LASTEXITCODE -eq 0) {
 # 2. Re‑enable hibernation (was disabled with -h off)
 # -----------------------------------------------------------------------------
 powercfg -h on 2>> $env:temp\revert_errors.log
-Write-Host "  > Hibernation re‑enabled." -ForegroundColor Green
+Write-Host "  > Hibernation re-enabled." -ForegroundColor Green
 
 # -----------------------------------------------------------------------------
 # 3. Re‑enable dynamic tick (was disabled with bcdedit)
@@ -49,7 +49,7 @@ if ($LASTEXITCODE -ne 0) {
     # If the value doesn't exist, delete it to revert to default
     bcdedit /deletevalue disabledynamictick 2>> $env:temp\revert_errors.log
 }
-Write-Host "  > Dynamic tick re‑enabled." -ForegroundColor Green
+Write-Host "  > Dynamic tick re-enabled." -ForegroundColor Green
 
 # -----------------------------------------------------------------------------
 # 4. (Optional) Delete any duplicate Ultimate Performance scheme created
