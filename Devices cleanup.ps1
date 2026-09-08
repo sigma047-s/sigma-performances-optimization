@@ -47,11 +47,12 @@ if ($unknownDevices.Count -eq 0) {
 }
 
 # -----------------------------------------------------------------------------
-# 2. REMOVE ALL GHOST DEVICES (DEEP - WITH PROMPT)
+# 2. REMOVE ALL GHOST DEVICES (DEEP - WITH PROMPT) - FIXED VERSION
 # -----------------------------------------------------------------------------
 Write-Host "  > Searching for all non-present 'ghost' devices..." -NoNewline
 
-$ghostDevices = Get-PnpDevice -PresentOnly $false
+# FIX: Use the 'Present' property directly instead of the broken -PresentOnly parameter
+$ghostDevices = Get-PnpDevice | Where-Object { $_.Present -eq $false }
 
 if ($ghostDevices.Count -eq 0) {
     Write-Host " None found." -ForegroundColor Green
