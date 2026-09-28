@@ -57,9 +57,6 @@ Write-Host "   3. PowerCfg Registry values" -ForegroundColor Yellow
 Write-Host "   4. CPU Optimization (AC / DC)" -ForegroundColor Yellow
 Write-Host "   5. Network Throttle (QoS)" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "[CAUTION] CPU optimization will significantly REDUCE battery life." -ForegroundColor Red
-Write-Host "[CAUTION] Removing ghost devices can break old configurations."   -ForegroundColor Red
-Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
 Write-Host ""
 
