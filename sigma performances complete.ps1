@@ -28,6 +28,16 @@ $script:TotalSteps  = 13
 $script:CurrentStep = 0
 
 # -----------------------------------------------------------------------------
+# Mount registry drives (PowerShell 7+ doesn't auto-mount HKU / HKCR)
+# -----------------------------------------------------------------------------
+if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
+    New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS -Scope Global | Out-Null
+}
+if (-not (Get-PSDrive -Name HKCR -ErrorAction SilentlyContinue)) {
+    New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -Scope Global | Out-Null
+}
+
+# -----------------------------------------------------------------------------
 # Progress helpers
 # -----------------------------------------------------------------------------
 function Write-OverallProgress {
@@ -331,8 +341,8 @@ if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 $originalScheme = (powercfg -getactivescheme) -replace '.*\s([A-F0-9\-]{36}).*', '$1'
 
 Write-SubProgress -Activity "CPU Optimization" -Status "Activating Ultimate Performance scheme..." -PercentComplete 3
-powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
-powercfg -setactive       e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
+powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null
+powercfg -setactive       e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null
 
 $cpuSettings = @{
     "PROCTHROTTLEMIN"=100; "PROCTHROTTLEMAX"=100; "PERFBOOSTMODE"=5; "CPMINCORES"=100;
@@ -353,16 +363,16 @@ foreach ($key in $cpuKeys) {
     $cpuIndex++
     $pct = 5 + [math]::Round($cpuIndex / $cpuTotal * 93)
     Write-SubProgress -Activity "CPU Optimization" -Status "Applying: $key ($cpuIndex/$cpuTotal)" -PercentComplete $pct
-    powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
-    powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
+    powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>$null
+    powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>$null
 }
 
 Write-SubProgress -Activity "CPU Optimization" -Status "Applying extra processor GUID..." -PercentComplete 98
-powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
-powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
+powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>$null
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>$null
 
 Write-SubProgress -Activity "CPU Optimization" -Status "Committing power scheme..." -PercentComplete 99
-powercfg -setactive SCHEME_CURRENT 2>> $errorLog
+powercfg -setactive SCHEME_CURRENT 2>$null
 
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
@@ -394,15 +404,15 @@ function Set-QosLimit {
     $policyName = "$PolicyPrefix$Mbps"
     Get-NetQosPolicy -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "$PolicyPrefix*" } |
-        ForEach-Object { Remove-NetQosPolicy -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue 2>> $errorLog }
-    New-NetQosPolicy -Name $policyName -ThrottleRateActionBitsPerSecond $bits -ErrorAction SilentlyContinue 2>> $errorLog
+        ForEach-Object { Remove-NetQosPolicy -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue 2>$null }
+    New-NetQosPolicy -Name $policyName -ThrottleRateActionBitsPerSecond $bits -ErrorAction SilentlyContinue 2>$null
 }
 
 function Remove-AllLimits {
     $policies = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$PolicyPrefix*" }
     if (-not $policies) { Write-Host "[INFO] No '$PolicyPrefix*' QoS policy is applied." -ForegroundColor DarkGray; return }
     foreach ($p in $policies) {
-        Remove-NetQosPolicy -Name $p.Name -Confirm:$false -ErrorAction SilentlyContinue 2>> $errorLog
+        Remove-NetQosPolicy -Name $p.Name -Confirm:$false -ErrorAction SilentlyContinue 2>$null
         Write-Host "[REMOVED] $($p.Name)" -ForegroundColor Green
     }
 }
