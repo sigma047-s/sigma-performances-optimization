@@ -2,40 +2,10 @@
 
 # =============================================================================
 # SIGMA PERFORMANCES - ALL-IN-ONE OPTIMIZATION SUITE
-# -----------------------------------------------------------------------------
-# Combined: SIGMA steps (Device Cleanup, Telemetry, PowerCfg, CPU, Network)
-#         + All registry tweaks (except Windows Update / Defender / Security)
-#
-# Order:
-#   1.  Device Cleanup           (Unknown + Ghost devices)
-#   2.  Telemetry Removal        (Registry + Services + Tasks)
-#   3.  PowerCfg Registry        (GlobalPowerPolicy)
-#   4.  CPU Optimization         (AC / DC)
-#   5.  Network Throttle         (QoS 1-3000 Mbps)
-#   6.  GPU / Display / Graphics
-#   7.  USB / Power / Kernel / Memory / FileSystem
-#   8.  Services                 (Disable / Delete)
-#   9.  Network / TCP-IP / MMCSS / Multimedia
-#   10. Explorer / Shell / UI / DWM
-#   11. Input / Per-App Priorities
-#   12. IE / Edge / Chrome / Office / Misc
-#   13. Context Menus / Shell Extensions
-#
-# Single 'Y' confirmation at start. Reboot prompt at end.
 # =============================================================================
 
 $script:TotalSteps  = 13
 $script:CurrentStep = 0
-
-# -----------------------------------------------------------------------------
-# Mount registry drives (PowerShell 7+ doesn't auto-mount HKU / HKCR)
-# -----------------------------------------------------------------------------
-if (-not (Get-PSDrive -Name HKU -ErrorAction SilentlyContinue)) {
-    New-PSDrive -Name HKU -PSProvider Registry -Root HKEY_USERS -Scope Global | Out-Null
-}
-if (-not (Get-PSDrive -Name HKCR -ErrorAction SilentlyContinue)) {
-    New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -Scope Global | Out-Null
-}
 
 # -----------------------------------------------------------------------------
 # Progress helpers
@@ -45,49 +15,58 @@ function Write-OverallProgress {
     $overall = [math]::Round((($script:CurrentStep - 1) + ($SubPercent / 100)) / $script:TotalSteps * 100)
     if ($overall -gt 100) { $overall = 100 }
     if ($overall -lt 0)   { $overall = 0 }
-    Write-Progress -Id 0 `
-        -Activity "SIGMA PERFORMANCES - All Optimizations" `
-        -Status   "Step $($script:CurrentStep)/$($script:TotalSteps): $Status" `
-        -PercentComplete $overall
+    Write-Progress -Id 0 -Activity "SIGMA PERFORMANCES - All Optimizations" `
+        -Status "Step $($script:CurrentStep)/$($script:TotalSteps): $Status" -PercentComplete $overall
 }
-
 function Write-SubProgress {
     param([string]$Activity, [string]$Status, [int]$PercentComplete)
     if ($PercentComplete -gt 100) { $PercentComplete = 100 }
     if ($PercentComplete -lt 0)   { $PercentComplete = 0 }
-    Write-Progress -Id 1 -ParentId 0 `
-        -Activity $Activity -Status $Status -PercentComplete $PercentComplete
+    Write-Progress -Id 1 -ParentId 0 -Activity $Activity -Status $Status -PercentComplete $PercentComplete
 }
-
-function Complete-SubProgress {
-    param([string]$Activity)
-    Write-Progress -Id 1 -ParentId 0 -Activity $Activity -Completed
-}
+function Complete-SubProgress { param([string]$Activity) Write-Progress -Id 1 -ParentId 0 -Activity $Activity -Completed }
 
 # -----------------------------------------------------------------------------
-# Registry helpers
+# Registry helpers  (provider-path conversion -> works without PSDrive)
 # -----------------------------------------------------------------------------
 $script:errorLog = "$env:TEMP\sigma_registry_errors.log"
 
+function Convert-RegPath {
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path)) { return $Path }
+    # Already a provider path
+    if ($Path -like 'Registry::*') { return $Path }
+    # Convert short hive names to provider paths
+    if ($Path -match '^(?i)HKU:\\?(.*)$')  { return "Registry::HKEY_USERS\$($Matches[1])" }
+    if ($Path -match '^(?i)HKCR:\\?(.*)$') { return "Registry::HKEY_CLASSES_ROOT\$($Matches[1])" }
+    if ($Path -match '^(?i)HKLM:\\?(.*)$') { return "Registry::HKEY_LOCAL_MACHINE\$($Matches[1])" }
+    if ($Path -match '^(?i)HKCU:\\?(.*)$') { return "Registry::HKEY_CURRENT_USER\$($Matches[1])" }
+    if ($Path -match '^(?i)HKCC:\\?(.*)$') { return "Registry::HKEY_CURRENT_CONFIG\$($Matches[1])" }
+    return $Path
+}
+
 function Set-RV {
     param([string]$Path, [string]$Name, $Value, [string]$Type = "DWord")
+    $rp = Convert-RegPath $Path
     try {
-        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
-        New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+        if (-not (Test-Path $rp)) { New-Item -Path $rp -Force | Out-Null }
+        New-ItemProperty -Path $rp -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
     } catch { Add-Content -Path $script:errorLog -Value "SET $Path\$Name : $($_.Exception.Message)" }
 }
 
 function Set-RVdef {
     param([string]$Path, $Value, [string]$Type = "String")
+    $rp = Convert-RegPath $Path
     try {
-        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
-        if ($Type -eq "String") { Set-Item -Path $Path -Value $Value -Force -ErrorAction Stop }
+        if (-not (Test-Path $rp)) { New-Item -Path $rp -Force | Out-Null }
+        if ($Type -eq "String") { Set-Item -Path $rp -Value $Value -Force -ErrorAction Stop }
     } catch { Add-Content -Path $script:errorLog -Value "DEF $Path : $($_.Exception.Message)" }
 }
 
 function Remove-RK {
     param([string]$Path)
-    try { if (Test-Path $Path) { Remove-Item -Path $Path -Recurse -Force -ErrorAction Stop } }
+    $rp = Convert-RegPath $Path
+    try { if (Test-Path $rp) { Remove-Item -Path $rp -Recurse -Force -ErrorAction Stop } }
     catch { Add-Content -Path $script:errorLog -Value "DEL $Path : $($_.Exception.Message)" }
 }
 
@@ -141,14 +120,12 @@ if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
 Write-SubProgress -Activity "Device Cleanup" -Status "Searching for 'Unknown' status devices..." -PercentComplete 5
 $unknownDevices = @(Get-PnpDevice | Where-Object { $_.Status -eq 'Unknown' })
-
 if ($unknownDevices.Count -eq 0) {
     Write-SubProgress -Activity "Device Cleanup" -Status "No unknown devices found." -PercentComplete 25
 } else {
     $i = 0; $n = $unknownDevices.Count
     foreach ($dev in $unknownDevices) {
-        $i++
-        $pct = 5 + [math]::Round($i / $n * 20)
+        $i++; $pct = 5 + [math]::Round($i / $n * 20)
         Write-SubProgress -Activity "Device Cleanup" -Status "Removing unknown: $($dev.FriendlyName) ($i/$n)" -PercentComplete $pct
         pnputil /remove-device $dev.InstanceId 2>> $errorLog | Out-Null
     }
@@ -156,31 +133,23 @@ if ($unknownDevices.Count -eq 0) {
 
 Write-SubProgress -Activity "Device Cleanup" -Status "Searching for non-present 'ghost' devices..." -PercentComplete 30
 $ghostDevices = @(Get-PnpDevice | Where-Object { $_.Present -eq $false })
-
 if ($ghostDevices.Count -eq 0) {
     Write-SubProgress -Activity "Device Cleanup" -Status "No ghost devices found." -PercentComplete 75
 } else {
     Complete-SubProgress -Activity "Device Cleanup"
-    Write-Host ""
-    Write-Host "  Ghost devices found:" -ForegroundColor Cyan
-    foreach ($dev in $ghostDevices) {
-        Write-Host "    - $($dev.FriendlyName) (Status: $($dev.Status))" -ForegroundColor Gray
-    }
+    Write-Host ""; Write-Host "  Ghost devices found:" -ForegroundColor Cyan
+    foreach ($dev in $ghostDevices) { Write-Host "    - $($dev.FriendlyName) (Status: $($dev.Status))" -ForegroundColor Gray }
     Write-Host ""
     Write-Host "[WARNING] Removing ghost devices can break old configurations." -ForegroundColor Red
     $ghostConfirm = Read-Host "Proceed with ghost device removal? (Type 'YES' to confirm)"
-
     if ($ghostConfirm -eq "YES") {
         $i = 0; $n = $ghostDevices.Count
         foreach ($dev in $ghostDevices) {
-            $i++
-            $pct = 30 + [math]::Round($i / $n * 45)
+            $i++; $pct = 30 + [math]::Round($i / $n * 45)
             Write-SubProgress -Activity "Device Cleanup" -Status "Removing ghost: $($dev.FriendlyName) ($i/$n)" -PercentComplete $pct
             pnputil /remove-device $dev.InstanceId 2>> $errorLog | Out-Null
         }
-    } else {
-        Write-Host "  Ghost device removal skipped." -ForegroundColor Yellow
-    }
+    } else { Write-Host "  Ghost device removal skipped." -ForegroundColor Yellow }
 }
 
 Write-SubProgress -Activity "Device Cleanup" -Status "Rescanning for hardware changes..." -PercentComplete 95
@@ -188,11 +157,8 @@ pnputil /scan-devices 2>> $errorLog | Out-Null
 
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else {
-        Remove-Item $errorLog -Force
-    }
+    if ($errorCount -gt 0) { Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow }
+    else { Remove-Item $errorLog -Force }
 }
 
 Complete-SubProgress -Activity "Device Cleanup"
@@ -216,18 +182,18 @@ $telemetryRegPaths = @(
     "HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows\CurrentVersion\Policies\DataCollection"
 )
 foreach ($path in $telemetryRegPaths) {
-    New-Item -Path $path -Force -ErrorAction SilentlyContinue | Out-Null
-    New-ItemProperty -Path $path -Name "AllowTelemetry" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+    $rp = Convert-RegPath $path
+    New-Item -Path $rp -Force -ErrorAction SilentlyContinue | Out-Null
+    New-ItemProperty -Path $rp -Name "AllowTelemetry" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
 }
 
-New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" -Name "Enabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" -Name "value" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config" -Name "AutoConnectAllowedOEM" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" -Name "TailoredExperiencesWithDiagnosticDataEnabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+Set-RV "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 0
+Set-RV "HKLM:\SOFTWARE\Microsoft\PolicyManager\default\WiFi\AllowWiFiHotSpotReporting" "value" 0
+Set-RV "HKLM:\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config" "AutoConnectAllowedOEM" 0
+Set-RV "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 0
 
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Telemetry Services..." -PercentComplete 30
-$telemetryServices = @("DiagTrack", "dmwappushservice")
-foreach ($service in $telemetryServices) {
+foreach ($service in @("DiagTrack","dmwappushservice")) {
     Stop-Service $service -ErrorAction SilentlyContinue 2>> $errorLog
     Set-Service  $service -StartupType Disabled -ErrorAction SilentlyContinue 2>> $errorLog
 }
@@ -247,13 +213,10 @@ foreach ($task in $telemetryTasks) {
 }
 
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Background App Tasks (global)..." -PercentComplete 70
-New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Force -ErrorAction SilentlyContinue | Out-Null
-New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsRunInBackground" -Value 2 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
+Set-RV "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" "LetAppsRunInBackground" 2
 
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Windows Error Reporting..." -PercentComplete 85
-New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Force -ErrorAction SilentlyContinue | Out-Null
-New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
-
+Set-RV "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" "Disabled" 1
 Set-Service  "WerSvc" -StartupType Disabled -ErrorAction SilentlyContinue 2>> $errorLog
 Stop-Service "WerSvc" -ErrorAction SilentlyContinue 2>> $errorLog
 
@@ -262,11 +225,8 @@ wevtutil set-log "Microsoft-Windows-TaskScheduler/Operational" /enabled:false 2>
 
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else {
-        Remove-Item $errorLog -Force
-    }
+    if ($errorCount -gt 0) { Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow }
+    else { Remove-Item $errorLog -Force }
 }
 
 Complete-SubProgress -Activity "Telemetry Removal"
@@ -284,11 +244,11 @@ if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
 function Set-RegistryValue {
     param([string]$Path, [string]$Name, $Value, [string]$Type)
+    $rp = Convert-RegPath $Path
     try {
-        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
-        New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
-    }
-    catch { Add-Content -Path $errorLog -Value $_.Exception.Message }
+        if (-not (Test-Path $rp)) { New-Item -Path $rp -Force | Out-Null }
+        New-ItemProperty -Path $rp -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+    } catch { Add-Content -Path $errorLog -Value $_.Exception.Message }
 }
 
 $regPath    = 'HKCU:\Control Panel\PowerCfg'
@@ -300,15 +260,8 @@ $policiesHex = @'
 00,00,00,00,00,00,00,00,00,00,84,03,00,00,2c,01,00,00,00,00,00,00,84,03,00,
 00,00,01,64,64,64,64,00,00
 '@
-
-$policiesBytes = [byte[]](
-    $policiesHex -split ',' |
-    ForEach-Object { [Convert]::ToByte($_.Trim(), 16) }
-)
-
-if ($policiesBytes.Count -ne 80) {
-    Add-Content -Path $errorLog -Value "Policies hex parsed to $($policiesBytes.Count) bytes; expected 80."
-}
+$policiesBytes = [byte[]]($policiesHex -split ',' | ForEach-Object { [Convert]::ToByte($_.Trim(), 16) })
+if ($policiesBytes.Count -ne 80) { Add-Content -Path $errorLog -Value "Policies hex parsed to $($policiesBytes.Count) bytes; expected 80." }
 
 Write-SubProgress -Activity "PowerCfg Registry" -Status "Writing CurrentPowerPolicy = '4'..." -PercentComplete 30
 Set-RegistryValue -Path $regPath -Name 'CurrentPowerPolicy' -Value '4' -Type String
@@ -318,11 +271,8 @@ Set-RegistryValue -Path $globalPath -Name 'Policies' -Value $policiesBytes -Type
 
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else {
-        Remove-Item $errorLog -Force
-    }
+    if ($errorCount -gt 0) { Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow }
+    else { Remove-Item $errorLog -Force }
 }
 
 Complete-SubProgress -Activity "PowerCfg Registry"
@@ -360,8 +310,7 @@ $cpuSettings = @{
 }
 $cpuKeys = @($cpuSettings.Keys); $cpuTotal = $cpuKeys.Count; $cpuIndex = 0
 foreach ($key in $cpuKeys) {
-    $cpuIndex++
-    $pct = 5 + [math]::Round($cpuIndex / $cpuTotal * 93)
+    $cpuIndex++; $pct = 5 + [math]::Round($cpuIndex / $cpuTotal * 93)
     Write-SubProgress -Activity "CPU Optimization" -Status "Applying: $key ($cpuIndex/$cpuTotal)" -PercentComplete $pct
     powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>$null
     powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>$null
@@ -376,9 +325,8 @@ powercfg -setactive SCHEME_CURRENT 2>$null
 
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
+    if ($errorCount -gt 0) { Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow }
+    else { Remove-Item $errorLog -Force }
 }
 
 Complete-SubProgress -Activity "CPU Optimization"
@@ -391,10 +339,7 @@ Write-Host "  [4/13] CPU Optimization .......................... DONE" -Foregrou
 $script:CurrentStep = 5
 Write-OverallProgress -Status "Network Throttle" -SubPercent 0
 
-$PolicyPrefix = "LimitPCto"
-$MinMbps      = 1
-$MaxMbps      = 3000
-
+$PolicyPrefix = "LimitPCto"; $MinMbps = 1; $MaxMbps = 3000
 $errorLog = "$env:TEMP\sigma_netqos_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
@@ -407,7 +352,6 @@ function Set-QosLimit {
         ForEach-Object { Remove-NetQosPolicy -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue 2>$null }
     New-NetQosPolicy -Name $policyName -ThrottleRateActionBitsPerSecond $bits -ErrorAction SilentlyContinue 2>$null
 }
-
 function Remove-AllLimits {
     $policies = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$PolicyPrefix*" }
     if (-not $policies) { Write-Host "[INFO] No '$PolicyPrefix*' QoS policy is applied." -ForegroundColor DarkGray; return }
@@ -416,7 +360,6 @@ function Remove-AllLimits {
         Write-Host "[REMOVED] $($p.Name)" -ForegroundColor Green
     }
 }
-
 function Show-AllLimits {
     $policies = Get-NetQosPolicy -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "$PolicyPrefix*" }
     if (-not $policies) { Write-Host "[INFO] No '$PolicyPrefix*' QoS policy is applied." -ForegroundColor DarkGray; return }
@@ -430,16 +373,12 @@ function Show-AllLimits {
         } else { Write-Host "[ACTIVE] $($p.Name)  ->  unknown" -ForegroundColor Cyan }
     }
 }
-
 function Show-Menu {
-    Write-Host ""
-    Write-Host "1. Apply throttle ($MinMbps-$MaxMbps Mbps)" -ForegroundColor White
+    Write-Host ""; Write-Host "1. Apply throttle ($MinMbps-$MaxMbps Mbps)" -ForegroundColor White
     Write-Host "2. Remove all throttles" -ForegroundColor White
     Write-Host "3. Show applied throttles" -ForegroundColor White
-    Write-Host "4. Quit" -ForegroundColor White
-    Write-Host ""
+    Write-Host "4. Quit" -ForegroundColor White; Write-Host ""
 }
-
 do {
     Show-Menu
     $choice = Read-Host "Choose an option (1-4)"
@@ -468,9 +407,8 @@ do {
 
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
+    if ($errorCount -gt 0) { Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow }
+    else { Remove-Item $errorLog -Force }
 }
 
 Complete-SubProgress -Activity "Network Throttle"
@@ -514,8 +452,7 @@ $videoCommon = @{
 }
 $i = 0; $n = $videoGuids.Count
 foreach ($k in $videoGuids) {
-    $i++
-    $pct = 5 + [math]::Round($i / $n * 40)
+    $i++; $pct = 5 + [math]::Round($i / $n * 40)
     Write-SubProgress -Activity "GPU / Display" -Status "Video profile $i/$n..." -PercentComplete $pct
     foreach ($name in $videoCommon.Keys) { Set-RV $k $name $videoCommon[$name] }
     if ($k -match '3D9D2216' -and $k -match '\\000[123]$') {
@@ -527,39 +464,25 @@ foreach ($k in $videoGuids) {
 
 Write-SubProgress -Activity "GPU / Display" -Status "GraphicsDrivers..." -PercentComplete 55
 $gd = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
-Set-RV $gd "HwSchedMode" 2
-Set-RV $gd "TdrLevel" 0
-Set-RV $gd "UseGpuTimer" 1
-Set-RV $gd "RmGpsPsEnablePerCpuCoreDpc" 1
-Set-RV $gd "PowerSavingTweaks" 0
-Set-RV $gd "DisableWriteCombining" 1
-Set-RV $gd "EnableRuntimePowerManagement" 0
-Set-RV $gd "PrimaryPushBufferSize" 1
-Set-RV $gd "FlTransitionLatency" 0
-Set-RV $gd "D3PCLatency" 0
-Set-RV $gd "RMDeepLlEntryLatencyUsec" 0
-Set-RV $gd "PciLatencyTimerControl" 0x20
-Set-RV $gd "Node3DLowLatency" 1
-Set-RV $gd "LOWLATENCY" 1
-Set-RV $gd "RmDisableRegistryCaching" 1
-Set-RV $gd "RMDisablePostL2Compression" 1
-Set-RV $gd "DpiMapIommuContiguous" 1
+Set-RV $gd "HwSchedMode" 2; Set-RV $gd "TdrLevel" 0; Set-RV $gd "UseGpuTimer" 1
+Set-RV $gd "RmGpsPsEnablePerCpuCoreDpc" 1; Set-RV $gd "PowerSavingTweaks" 0
+Set-RV $gd "DisableWriteCombining" 1; Set-RV $gd "EnableRuntimePowerManagement" 0
+Set-RV $gd "PrimaryPushBufferSize" 1; Set-RV $gd "FlTransitionLatency" 0
+Set-RV $gd "D3PCLatency" 0; Set-RV $gd "RMDeepLlEntryLatencyUsec" 0
+Set-RV $gd "PciLatencyTimerControl" 0x20; Set-RV $gd "Node3DLowLatency" 1
+Set-RV $gd "LOWLATENCY" 1; Set-RV $gd "RmDisableRegistryCaching" 1
+Set-RV $gd "RMDisablePostL2Compression" 1; Set-RV $gd "DpiMapIommuContiguous" 1
 
 Write-SubProgress -Activity "GPU / Display" -Status "GraphicsDrivers\Power..." -PercentComplete 75
 $gdp = "$gd\Power"
 foreach ($n2 in @("UseGpuTimer","RmGpsPsEnablePerCpuCoreDpc")) { Set-RV $gdp $n2 1 }
 foreach ($n2 in @("PowerSavingTweaks","EnableRuntimePowerManagement","FlTransitionLatency","D3PCLatency","RMDeepLlEntryLatencyUsec")) { Set-RV $gdp $n2 0 }
-Set-RV $gdp "DisableWriteCombining" 1
-Set-RV $gdp "PrimaryPushBufferSize" 1
-Set-RV $gdp "PciLatencyTimerControl" 0x20
-Set-RV $gdp "Node3DLowLatency" 1
-Set-RV $gdp "LOWLATENCY" 1
-Set-RV $gdp "RmDisableRegistryCaching" 1
+Set-RV $gdp "DisableWriteCombining" 1; Set-RV $gdp "PrimaryPushBufferSize" 1
+Set-RV $gdp "PciLatencyTimerControl" 0x20; Set-RV $gdp "Node3DLowLatency" 1
+Set-RV $gdp "LOWLATENCY" 1; Set-RV $gdp "RmDisableRegistryCaching" 1
 Set-RV $gdp "RMDisablePostL2Compression" 1
-Set-RV $gdp "MonitorRefreshLatencyTolerance" 1
-Set-RV $gdp "MonitorLatencyTolerance" 1
-Set-RV $gdp "TransitionLatency" 1
-Set-RV $gdp "Latency" 1
+Set-RV $gdp "MonitorRefreshLatencyTolerance" 1; Set-RV $gdp "MonitorLatencyTolerance" 1
+Set-RV $gdp "TransitionLatency" 1; Set-RV $gdp "Latency" 1
 Set-RV $gdp "MiracastPerfTrackGraphicsLatency" 1
 Set-RV $gdp "MaxIAverageGraphicsLatencyInOneBucket" 1
 foreach ($n2 in @("DefaultMemoryRefreshLatencyToleranceNoContext","DefaultMemoryRefreshLatencyToleranceMonitorOff",
@@ -603,73 +526,46 @@ Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\kbdclass\Parameters" "KeyboardDa
 
 Write-SubProgress -Activity "System" -Status "Kernel..." -PercentComplete 20
 $k = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\kernel"
-Set-RV $k "DpcWatchdogProfileOffset" 0
-Set-RV $k "DpcTimeout" 0
-Set-RV $k "DpcWatchdogPeriod" 0
-Set-RV $k "DisableAutoBoost" 1
-Set-RV $k "DistributeTimers" 1
-Set-RV $k "IdealDpcRate" 1
-Set-RV $k "MaximumDpcQueueDepth" 1
-Set-RV $k "MinimumDpcRate" 1
-Set-RV $k "ThreadDpcEnable" 1
-Set-RV $k "AdjustDpcThreshold" 0
-Set-RV $k "MaximumSharedReadyQueueSize" 1
-Set-RV $k "CoalescingTimerInterval" 0
+Set-RV $k "DpcWatchdogProfileOffset" 0; Set-RV $k "DpcTimeout" 0; Set-RV $k "DpcWatchdogPeriod" 0
+Set-RV $k "DisableAutoBoost" 1; Set-RV $k "DistributeTimers" 1; Set-RV $k "IdealDpcRate" 1
+Set-RV $k "MaximumDpcQueueDepth" 1; Set-RV $k "MinimumDpcRate" 1
+Set-RV $k "ThreadDpcEnable" 1; Set-RV $k "AdjustDpcThreshold" 0
+Set-RV $k "MaximumSharedReadyQueueSize" 1; Set-RV $k "CoalescingTimerInterval" 0
 
 Write-SubProgress -Activity "System" -Status "Session Manager..." -PercentComplete 35
 $sm = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager"
-Set-RV $sm "AlpcWakePolicy" 1
-Set-RV $sm "CoalescingTimerInterval" 0
+Set-RV $sm "AlpcWakePolicy" 1; Set-RV $sm "CoalescingTimerInterval" 0
 Set-RV "$sm\Executive" "CoalescingTimerInterval" 0
 Set-RV "$sm\I/O System" "PassiveIntRealTimeWorkerPriority" 0x18
-Set-RV "$sm\Power" "CoalescingTimerInterval" 0
-Set-RV "$sm\Power" "SleepStudyDisabled" 1
+Set-RV "$sm\Power" "CoalescingTimerInterval" 0; Set-RV "$sm\Power" "SleepStudyDisabled" 1
 
 $mm = "$sm\Memory Management"
-Set-RV $mm "IoPageLockLimit" 0xffffffff
-Set-RV $mm "DisablePagingExecutive" 1
-Set-RV $mm "LargeSystemCache" 1
-Set-RV $mm "NonPagedPoolSize" 0xc0
-Set-RV $mm "PagedPoolSize" 0xc0
-Set-RV $mm "PoolUsageMaximum" 0xc0
-Set-RV $mm "SecondLevelDataCache" 0x3072
-Set-RV $mm "ThirdLevelDataCache" 0x8192
-Set-RV $mm "PhysicalAddressExtension" 1
-Set-RV $mm "MoveImages" 0
+Set-RV $mm "IoPageLockLimit" 0xffffffff; Set-RV $mm "DisablePagingExecutive" 1
+Set-RV $mm "LargeSystemCache" 1; Set-RV $mm "NonPagedPoolSize" 0xc0
+Set-RV $mm "PagedPoolSize" 0xc0; Set-RV $mm "PoolUsageMaximum" 0xc0
+Set-RV $mm "SecondLevelDataCache" 0x3072; Set-RV $mm "ThirdLevelDataCache" 0x8192
+Set-RV $mm "PhysicalAddressExtension" 1; Set-RV $mm "MoveImages" 0
 Set-RV "$mm\PrefetchParameters" "EnablePrefetcher" 0
 Set-RV "$mm\PrefetchParameters" "EnableSuperfetch" 0
 
 Write-SubProgress -Activity "System" -Status "FileSystem..." -PercentComplete 55
 $fs = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
 foreach ($n2 in @("DisableDeleteNotification","RefsDisableLastAccessUpdate","LongPathsEnabled",
-                 "NtfsDisableLastAccessUpdate","NtfsDisableSpotCorruptionHandling","NTFSDisable8dot3NameCreation")) {
-    Set-RV $fs $n2 1
-}
-foreach ($n2 in @("Win31FileSystem","Win95TruncatedExtensions","NtfsMemoryUsage","NtfsBugcheckOnCorrupt")) {
-    Set-RV $fs $n2 0
-}
+                 "NtfsDisableLastAccessUpdate","NtfsDisableSpotCorruptionHandling","NTFSDisable8dot3NameCreation")) { Set-RV $fs $n2 1 }
+foreach ($n2 in @("Win31FileSystem","Win95TruncatedExtensions","NtfsMemoryUsage","NtfsBugcheckOnCorrupt")) { Set-RV $fs $n2 0 }
 Set-RV $fs "NtfsMftZoneReservation" 4
 
 Write-SubProgress -Activity "System" -Status "Power..." -PercentComplete 70
 $pw = "HKLM:\SYSTEM\CurrentControlSet\Control\Power"
-Set-RV $pw "CoalescingTimerInterval" 0
-Set-RV $pw "ExitLatency" 1
-Set-RV $pw "ExitLatencyCheckEnabled" 1
-Set-RV $pw "Latency" 1
-Set-RV $pw "LatencyToleranceDefault" 1
-Set-RV $pw "LatencyToleranceFSVP" 1
-Set-RV $pw "LatencyTolerancePerfOverride" 1
-Set-RV $pw "LatencyToleranceScreenOffIR" 1
-Set-RV $pw "LatencyToleranceVSyncEnabled" 1
-Set-RV $pw "RtlCapabilityCheckLatency" 1
-Set-RV $pw "HibernateEnabled" 0
-Set-RV $pw "CsEnabled" 0
-Set-RV $pw "EnergyEstimationEnabled" 0
-Set-RV $pw "PerfCalculateActualUtilization" 0
-Set-RV $pw "SleepReliabilityDetailedDiagnostics" 0
-Set-RV $pw "EventProcessorEnabled" 0
-Set-RV $pw "QosManagesIdleProcessors" 0
-Set-RV $pw "DisableVsyncLatencyUpdate" 0
+Set-RV $pw "CoalescingTimerInterval" 0; Set-RV $pw "ExitLatency" 1
+Set-RV $pw "ExitLatencyCheckEnabled" 1; Set-RV $pw "Latency" 1
+Set-RV $pw "LatencyToleranceDefault" 1; Set-RV $pw "LatencyToleranceFSVP" 1
+Set-RV $pw "LatencyTolerancePerfOverride" 1; Set-RV $pw "LatencyToleranceScreenOffIR" 1
+Set-RV $pw "LatencyToleranceVSyncEnabled" 1; Set-RV $pw "RtlCapabilityCheckLatency" 1
+Set-RV $pw "HibernateEnabled" 0; Set-RV $pw "CsEnabled" 0
+Set-RV $pw "EnergyEstimationEnabled" 0; Set-RV $pw "PerfCalculateActualUtilization" 0
+Set-RV $pw "SleepReliabilityDetailedDiagnostics" 0; Set-RV $pw "EventProcessorEnabled" 0
+Set-RV $pw "QosManagesIdleProcessors" 0; Set-RV $pw "DisableVsyncLatencyUpdate" 0
 Set-RV $pw "DisableSensorWatchdog" 1
 Set-RV "$pw\ModernSleep" "CoalescingTimerInterval" 0
 Set-RV "$pw\PowerThrottling" "PowerThrottlingOff" 1
@@ -728,8 +624,7 @@ $svcDelete = @(
 )
 $i = 0; $n = $svcDelete.Count
 foreach ($s in $svcDelete) {
-    $i++
-    $pct = 55 + [math]::Round($i / $n * 40)
+    $i++; $pct = 55 + [math]::Round($i / $n * 40)
     Write-SubProgress -Activity "Services" -Status "Deleting: $s ($i/$n)" -PercentComplete $pct
     Remove-RK "HKLM:\SYSTEM\CurrentControlSet\Services\$s"
 }
@@ -746,20 +641,13 @@ Write-OverallProgress -Status "Network / TCP-IP / MMCSS" -SubPercent 0
 
 Write-SubProgress -Activity "Network" -Status "TCP/IP parameters..." -PercentComplete 5
 $tcp = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-Set-RV $tcp "EnableWsd" 0
-Set-RV $tcp "TcpWindowSize" 0x3ebc0
-Set-RV $tcp "DisableDynamicDiscovery" 1
-Set-RV $tcp "EnablePMTUDiscovery" 0
-Set-RV $tcp "EnablePMTUBDetect" 0
-Set-RV $tcp "DisableTaskOffload" 0
-Set-RV $tcp "TcpMaxDupAcks" 2
-Set-RV $tcp "UseDomainNameDevolution" 0
-Set-RV $tcp "IGMPLevel" 0
-Set-RV $tcp "DelayedAckFrequency" 1
-Set-RV $tcp "DelayedAckTicks" 1
-Set-RV $tcp "CongestionAlgorithm" 1
-Set-RV $tcp "MultihopSets" 0x0f
-Set-RV $tcp "FastCopyReceiveThreshold" 0x4000
+Set-RV $tcp "EnableWsd" 0; Set-RV $tcp "TcpWindowSize" 0x3ebc0
+Set-RV $tcp "DisableDynamicDiscovery" 1; Set-RV $tcp "EnablePMTUDiscovery" 0
+Set-RV $tcp "EnablePMTUBDetect" 0; Set-RV $tcp "DisableTaskOffload" 0
+Set-RV $tcp "TcpMaxDupAcks" 2; Set-RV $tcp "UseDomainNameDevolution" 0
+Set-RV $tcp "IGMPLevel" 0; Set-RV $tcp "DelayedAckFrequency" 1
+Set-RV $tcp "DelayedAckTicks" 1; Set-RV $tcp "CongestionAlgorithm" 1
+Set-RV $tcp "MultihopSets" 0x0f; Set-RV $tcp "FastCopyReceiveThreshold" 0x4000
 Set-RV $tcp "FastSendDatagramThreshold" 0x4000
 Set-RV "$tcp\Interfaces" "TcpAckFrequency" 1
 Set-RV "$tcp\Interfaces" "TCPNoDelay" 1
@@ -773,21 +661,14 @@ Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters" "DisabledComp
 
 Write-SubProgress -Activity "Network" -Status "AFD / DNS priority..." -PercentComplete 25
 $afd = "HKLM:\SYSTEM\CurrentControlSet\Services\AFD\Parameters"
-Set-RV $afd "FastSendDatagramThreshold" 0x5dc
-Set-RV $afd "FastCopyReceiveThreshold" 0x5dc
-Set-RV $afd "DefaultReceiveWindow" 0x4000
-Set-RV $afd "DefaultSendWindow" 0x4000
-Set-RV $afd "DynamicSendBufferDisable" 0
-Set-RV $afd "IgnorePushBitOnReceives" 1
-Set-RV $afd "NonBlockingSendSpecialBuffering" 1
-Set-RV $afd "DisableRawSecurity" 1
+Set-RV $afd "FastSendDatagramThreshold" 0x5dc; Set-RV $afd "FastCopyReceiveThreshold" 0x5dc
+Set-RV $afd "DefaultReceiveWindow" 0x4000; Set-RV $afd "DefaultSendWindow" 0x4000
+Set-RV $afd "DynamicSendBufferDisable" 0; Set-RV $afd "IgnorePushBitOnReceives" 1
+Set-RV $afd "NonBlockingSendSpecialBuffering" 1; Set-RV $afd "DisableRawSecurity" 1
 
 $sp = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\ServiceProvider"
-Set-RV $sp "DnsPriority" 6
-Set-RV $sp "LocalPriority" 4
-Set-RV $sp "NetbtPriority" 7
-Set-RV $sp "HostPriority" 5
-Set-RV $sp "HostsPriority" 5
+Set-RV $sp "DnsPriority" 6; Set-RV $sp "LocalPriority" 4
+Set-RV $sp "NetbtPriority" 7; Set-RV $sp "HostPriority" 5; Set-RV $sp "HostsPriority" 5
 
 Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\NetBT\Parameters" "EnableLMHOSTS" 1
 Set-RV "HKLM:\SYSTEM\CurrentControlSet\Control\NetworkProvider" "RestoreConnection" 0
@@ -799,12 +680,9 @@ Set-RV "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Network Connections" "NC_DoNot
 
 Write-SubProgress -Activity "Network" -Status "Multimedia / MMCSS..." -PercentComplete 45
 $mm2 = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
-Set-RV $mm2 "SystemResponsiveness" 0
-Set-RV $mm2 "NetworkThrottlingIndex" 0xffffffff
-Set-RV $mm2 "AlwaysOn" 1
-Set-RV $mm2 "NoLazyMode" 1
-Set-RV $mm2 "AllowHeadlessExecution" 1
-Set-RV $mm2 "AllowMultipleBackgroundTasks" 1
+Set-RV $mm2 "SystemResponsiveness" 0; Set-RV $mm2 "NetworkThrottlingIndex" 0xffffffff
+Set-RV $mm2 "AlwaysOn" 1; Set-RV $mm2 "NoLazyMode" 1
+Set-RV $mm2 "AllowHeadlessExecution" 1; Set-RV $mm2 "AllowMultipleBackgroundTasks" 1
 Set-RV $mm2 "InactivityTimeoutMs" 0xffffffff
 
 $mmTasks = @{
@@ -857,7 +735,6 @@ Set-RV "HKLM:\SOFTWARE\Policies\Microsoft\Windows\LLTD" "ProhibitRspndrOnPrivate
 
 Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters\Config\VpnCostedNetworkSettings" "NoRoamingNetwork" 1
 Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\RasMan\Parameters\Config\VpnCostedNetworkSettings" "NoCostedNetwork" 1
-
 Set-RV "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WwanSvc\NetCost" "Cost3G" 2
 Set-RV "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WwanSvc\NetCost" "Cost4G" 2
 Set-RV "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WwanSvc\CellularDataAccess" "LetAppsAccessCellularData" 1
@@ -896,32 +773,19 @@ Set-RV "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows" "EnableDwmIn
 
 Write-SubProgress -Activity "Explorer" -Status "Explorer Advanced..." -PercentComplete 25
 $adv = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-Set-RV $adv "ExtendedUIHoverTime" 0x10
-Set-RV $adv "DontPrettyPath" 1
-Set-RV $adv "ListviewShadow" 0
-Set-RV $adv "TaskbarAnimations" 0
-Set-RV $adv "ListviewAlphaSelect" 0
-Set-RV $adv "ListviewWatermark" 0
-Set-RV $adv "StartShownOnUpgrade" 1
-Set-RV $adv "TaskbarDa" 0
-Set-RV $adv "LaunchTo" 1
-Set-RV $adv "TaskbarMn" 0
-Set-RV $adv "Start_NotifyNewApps" 0
-Set-RV $adv "ShowSecondsInSystemClock" 1
-Set-RV $adv "Start_ShowRun" 1
-Set-RV $adv "ShowSyncProviderNotifications" 0
-Set-RV $adv "NavPaneShowAllFolders" 0
-Set-RV $adv "NoNetCrawling" 1
-Set-RV $adv "TaskbarSi" 1
-Set-RV $adv "HideFileExt" 0
-Set-RV $adv "ShowSuperHidden" 1
-Set-RV $adv "SeparateProcess" 0
-Set-RV $adv "MMTaskbarGlomLevel" 0
-Set-RV $adv "ShowInfoTip" 1
-Set-RV $adv "HideIcons" 0
-Set-RV $adv "MapNetDrvBtn" 0
-Set-RV $adv "WebView" 0
-Set-RV $adv "DITest" 0
+Set-RV $adv "ExtendedUIHoverTime" 0x10; Set-RV $adv "DontPrettyPath" 1
+Set-RV $adv "ListviewShadow" 0; Set-RV $adv "TaskbarAnimations" 0
+Set-RV $adv "ListviewAlphaSelect" 0; Set-RV $adv "ListviewWatermark" 0
+Set-RV $adv "StartShownOnUpgrade" 1; Set-RV $adv "TaskbarDa" 0
+Set-RV $adv "LaunchTo" 1; Set-RV $adv "TaskbarMn" 0
+Set-RV $adv "Start_NotifyNewApps" 0; Set-RV $adv "ShowSecondsInSystemClock" 1
+Set-RV $adv "Start_ShowRun" 1; Set-RV $adv "ShowSyncProviderNotifications" 0
+Set-RV $adv "NavPaneShowAllFolders" 0; Set-RV $adv "NoNetCrawling" 1
+Set-RV $adv "TaskbarSi" 1; Set-RV $adv "HideFileExt" 0
+Set-RV $adv "ShowSuperHidden" 1; Set-RV $adv "SeparateProcess" 0
+Set-RV $adv "MMTaskbarGlomLevel" 0; Set-RV $adv "ShowInfoTip" 1
+Set-RV $adv "HideIcons" 0; Set-RV $adv "MapNetDrvBtn" 0
+Set-RV $adv "WebView" 0; Set-RV $adv "DITest" 0
 
 Set-RV "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "NoPreviousVersionsPage" 1
 Set-RV "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "MultipleInvokePromptMinimum" 0x1388
@@ -1096,9 +960,7 @@ Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\kbdhid\Parameters" "CrashOnCtrlS
 $drvThread = @("mouclass","mouhid","DXGKrnl","USBXHCI","USBHUB3","amdkmdap","nvlddmkm",
                 "amd_sata","BTUSB","BthLEEnum","BthHFEnum","umbus_A1614B8FA282BCE3",
                 "RTWlanE","RtkBtManServ","RtkBtFilter","rtump64x64")
-foreach ($d in $drvThread) {
-    Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\$d\Parameters" "ThreadPriority" 0x1f
-}
+foreach ($d in $drvThread) { Set-RV "HKLM:\SYSTEM\CurrentControlSet\Services\$d\Parameters" "ThreadPriority" 0x1f }
 
 Set-RV "HKCU:\Control Panel\Keyboard" "KeyboardDelay" "0" String
 Set-RV "HKCU:\Control Panel\Keyboard" "KeyboardSpeed" "10" String
@@ -1127,9 +989,7 @@ foreach ($n2 in @("IRQ4294967253Priority","IRQ4294967254Priority","IRQ4294967259
                  "IRQ4294967288Priority","IRQ4294967289Priority","IRQ4294967290Priority",
                  "IRQ4294967291Priority","IRQ4294967292Priority","IRQ4294967293Priority",
                  "IRQ4294967294Priority","IRQ1Priority","IRQ6Priority","IRQ7Priority",
-                 "IRQ25Priority","IRQ36Priority","IRQ55Priority","IRQ57Priority","IRQ8Priority")) {
-    Set-RV $irq $n2 1
-}
+                 "IRQ25Priority","IRQ36Priority","IRQ55Priority","IRQ57Priority","IRQ8Priority")) { Set-RV $irq $n2 1 }
 Set-RV $irq "IRQ4294967260Priority" 2
 Set-RV $irq "IRQ4294967261Priority" 2
 Set-RV $irq "Win32PrioritySeparation" 0x26
@@ -1436,30 +1296,19 @@ Set-RV "HKCU:\Software\Policies\Microsoft\WindowsMediaPlayer" "PreventCodecDownl
 
 Write-SubProgress -Activity "Apps" -Status "Chrome policies..." -PercentComplete 20
 $chrome = "HKLM:\SOFTWARE\Policies\Google\Chrome"
-Set-RV $chrome "TranslateEnabled" 1
-Set-RV $chrome "TaskManagerEndProcessEnabled" 1
-Set-RV $chrome "UserFeedbackAllowed" 0
-Set-RV $chrome "SpellCheckServiceEnabled" 0
-Set-RV $chrome "SpellcheckEnabled" 0
-Set-RV $chrome "MediaRouterCastAllowAllIPs" 1
-Set-RV $chrome "AllowDinosaurEasterEgg" 1
-Set-RV $chrome "DefaultGeolocationSetting" 2
-Set-RV $chrome "DefaultCookiesSetting" 1
-Set-RV $chrome "DefaultPopupsSetting" 2
-Set-RV $chrome "DefaultSensorsSetting" 2
-Set-RV $chrome "DefaultWebBluetoothGuardSetting" 2
-Set-RV $chrome "DefaultWebUsbGuardSetting" 2
-Set-RV $chrome "EnableMediaRouter" 1
-Set-RV $chrome "ShowCastIconInToolbar" 1
-Set-RV $chrome "CloudPrintProxyEnabled" 0
-Set-RV $chrome "PrintingEnabled" 1
-Set-RV $chrome "SafeBrowsingProtectionLevel" 0
-Set-RV $chrome "SafeBrowsingExtendedReportingEnabled" 0
-Set-RV $chrome "HomepageIsNewTabPage" 0
+Set-RV $chrome "TranslateEnabled" 1; Set-RV $chrome "TaskManagerEndProcessEnabled" 1
+Set-RV $chrome "UserFeedbackAllowed" 0; Set-RV $chrome "SpellCheckServiceEnabled" 0
+Set-RV $chrome "SpellcheckEnabled" 0; Set-RV $chrome "MediaRouterCastAllowAllIPs" 1
+Set-RV $chrome "AllowDinosaurEasterEgg" 1; Set-RV $chrome "DefaultGeolocationSetting" 2
+Set-RV $chrome "DefaultCookiesSetting" 1; Set-RV $chrome "DefaultPopupsSetting" 2
+Set-RV $chrome "DefaultSensorsSetting" 2; Set-RV $chrome "DefaultWebBluetoothGuardSetting" 2
+Set-RV $chrome "DefaultWebUsbGuardSetting" 2; Set-RV $chrome "EnableMediaRouter" 1
+Set-RV $chrome "ShowCastIconInToolbar" 1; Set-RV $chrome "CloudPrintProxyEnabled" 0
+Set-RV $chrome "PrintingEnabled" 1; Set-RV $chrome "SafeBrowsingProtectionLevel" 0
+Set-RV $chrome "SafeBrowsingExtendedReportingEnabled" 0; Set-RV $chrome "HomepageIsNewTabPage" 0
 Set-RV $chrome "HomepageLocation" "google.com" String
 Set-RV $chrome "NewTabPageLocation" "google.com" String
-Set-RV $chrome "MetricsReportingEnabled" 0
-Set-RV $chrome "DeviceMetricsReportingEnabled" 0
+Set-RV $chrome "MetricsReportingEnabled" 0; Set-RV $chrome "DeviceMetricsReportingEnabled" 0
 Set-RV "$chrome\ExtensionInstallForcelist" "1" "cjpalhdlnbpafiamejdnhcphjbkeiagm" String
 Set-RV "$chrome\ExtensionInstallForcelist" "2" "fihnjjcciajhdojfnbdddfaoknhalnja" String
 Set-RV "$chrome\ExtensionInstallForcelist" "3" "bnomihfieiccainjcjblhegjgglakjdd" String
@@ -1777,9 +1626,7 @@ if (Test-Path $script:errorLog) {
     $errorCount = (Get-Content $script:errorLog | Measure-Object -Line).Lines
     if ($errorCount -gt 0) {
         Write-Host "[WARNING] $errorCount registry errors occurred. Check log: $script:errorLog" -ForegroundColor Yellow
-    } else {
-        Remove-Item $script:errorLog -Force
-    }
+    } else { Remove-Item $script:errorLog -Force }
 }
 
 Write-Host "========== SIGMA PERFORMANCES - SUMMARY ==========" -ForegroundColor Green
