@@ -2,17 +2,17 @@
 #Requires -RunAsAdministrator
 
 # =============================================================================
-# SIGMA PERFORMANCE v0.9.0
-#  - HTML-first output (benchmark, transaction, snapshot reports)
-#  - ~80 optimizations across the master map
-#  - Extended transaction kinds: Service, ScheduledTask, Power, Fsutil, Registry
+# SIGMA PERFORMANCE v0.9.1
+#  - HTML-first output (scan report, benchmark, comparison, transaction)
+#  - 82 optimizations across the master map, all transactional
+#  - Fixed: constructors accept Note positionally (v0.9.0 cast bug)
 # =============================================================================
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
 Set-StrictMode -Version 1.0
 
-$script:SigmaVersion       = '0.9.0'
+$script:SigmaVersion       = '0.9.1'
 $script:BenchmarkSchemaVer = 5
 $script:TransactionSchema  = 5
 $script:RulesVersion       = 2
@@ -25,7 +25,7 @@ Write-Host ""
 Write-Host "========== SIGMA PERFORMANCES v$($script:SigmaVersion) ==========" -ForegroundColor Green
 Write-Host ""
 Write-Host "[INFO] Diagnostic scan + transactional optimization (HTML output)." -ForegroundColor Cyan
-Write-Host "[INFO] ~80 optimizations available. Every change is verified and reversible." -ForegroundColor Cyan
+Write-Host "[INFO] 82 optimizations available. Every change is verified and reversible." -ForegroundColor Cyan
 Write-Host ""
 Write-Host "[WARNING] Create a System Restore point before proceeding." -ForegroundColor Yellow
 Write-Host ""
@@ -94,7 +94,7 @@ class SigmaCriticalMutationException : System.Exception {
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 2 - HTML helpers (all user-facing output goes here)
+# SECTION 2 - HTML helpers
 # -----------------------------------------------------------------------------
 
 Add-Type -AssemblyName System.Web -EA SilentlyContinue
@@ -120,7 +120,7 @@ code{padding:.1em .35em;font-size:.92em}
 .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .dim{color:var(--dim)}
 .meta{color:var(--dim);font-size:12px;margin:.3em 0}
 .card{background:#14171d;border:1px solid var(--border);border-radius:4px;padding:1em 1.2em;margin:1em 0}
-.kv{display:grid;grid-template-columns:220px 1fr;gap:.4em 1em;font-size:13px}
+.kv{display:grid;grid-template-columns:240px 1fr;gap:.4em 1em;font-size:13px}
 .kv .k{color:var(--dim)}
 .badge{display:inline-block;padding:.15em .55em;border-radius:3px;font-size:11px;font-weight:600;text-transform:uppercase}
 .badge.ok{background:#1b3a2a;color:var(--ok)}
@@ -137,7 +137,8 @@ hr{border:none;border-top:1px solid var(--border);margin:1.5em 0}
 
 function ConvertTo-SigHtmlPage {
     param([Parameter(Mandatory)][string]$Title, [Parameter(Mandatory)][string]$Body, [string]$Subtitle)
-    $sub = if ($Subtitle) { "<p class='lede'>$(ConvertTo-SigHtmlEncoded $Subtitle)</p>" } else { '' }
+    $sub = ''
+    if ($Subtitle) { $sub = "<p class='lede'>$(ConvertTo-SigHtmlEncoded $Subtitle)</p>" }
     @"
 <!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -170,13 +171,10 @@ function ConvertTo-SigHtmlTable {
         [void]$sb.Append("<tr>")
         foreach ($c in $Columns) {
             $v = $null
-            if ($item -is [System.Collections.IDictionary]) { $v = $item[$c] }
-            else { $v = $item.$c }
+            if ($item -is [System.Collections.IDictionary]) { $v = $item[$c] } else { $v = $item.$c }
             if ($v -is [datetime]) { $v = $v.ToString('yyyy-MM-dd HH:mm:ss') }
             if ($v -is [array]) { $v = ($v -join ', ') }
-            if ($v -is [PSCustomObject] -or $v -is [System.Collections.IDictionary]) {
-                $v = ($v | ConvertTo-Json -Depth 2 -Compress)
-            }
+            if ($v -is [PSCustomObject] -or $v -is [System.Collections.IDictionary]) { $v = ($v | ConvertTo-Json -Depth 2 -Compress) }
             [void]$sb.Append("<td>$(ConvertTo-SigHtmlEncoded $v)</td>")
         }
         [void]$sb.Append("</tr>")
@@ -193,24 +191,14 @@ function ConvertTo-SigHtmlKeyValue {
         $v = $Map[$k]
         if ($v -is [datetime]) { $v = $v.ToString('yyyy-MM-dd HH:mm:ss') }
         if ($v -is [PSCustomObject] -or $v -is [System.Collections.IDictionary]) {
-            $v = "<pre>$(ConvertTo-SigHtmlEncoded (($v | ConvertTo-Json -Depth 4)))</pre>"
-            [void]$sb.Append("<div class='k'>$(ConvertTo-SigHtmlEncoded $k)</div><div>$v</div>")
+            $encoded = ConvertTo-SigHtmlEncoded ($v | ConvertTo-Json -Depth 4)
+            [void]$sb.Append("<div class='k'>$(ConvertTo-SigHtmlEncoded $k)</div><div><pre>$encoded</pre></div>")
         } else {
             [void]$sb.Append("<div class='k'>$(ConvertTo-SigHtmlEncoded $k)</div><div>$(ConvertTo-SigHtmlEncoded $v)</div>")
         }
     }
     [void]$sb.Append("</div>")
     return $sb.ToString()
-}
-
-function Get-SigStatusBadge {
-    param([string]$Status)
-    switch ($Status) {
-        'OK'   { return "<span class='badge ok'>OK</span>" }
-        'WARN' { return "<span class='badge warn'>WARN</span>" }
-        'FAIL' { return "<span class='badge bad'>FAIL</span>" }
-        default { return "<span class='badge info'>INFO</span>" }
-    }
 }
 
 # -----------------------------------------------------------------------------
@@ -230,12 +218,11 @@ function Write-SigJournalEvent {
     )
     $dir = Join-Path $script:SigmaTx $TxId
     if (-not (Test-Path $dir)) { throw "Transaction not found: $TxId" }
-    $entry = [PSCustomObject]@{
+    [PSCustomObject]@{
         TxId=$TxId; MutationId=$MutationId; Event=$Event; Sequence=$Sequence
         Kind=$Kind; Target=$Target; Prior=$Prior; New=$New; Detail=$Detail
         Time=(Get-Date).ToString('o')
-    }
-    $entry | ConvertTo-Json -Depth 6 -Compress | Add-Content (Join-Path $dir 'journal.jsonl') -Encoding UTF8
+    } | ConvertTo-Json -Depth 6 -Compress | Add-Content (Join-Path $dir 'journal.jsonl') -Encoding UTF8
 }
 
 function Get-SigNextSequence {
@@ -277,7 +264,7 @@ function Write-SigJournalHash {
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 4 - Transaction engine (extended with Service, Task, Power)
+# SECTION 4 - Transaction engine
 # -----------------------------------------------------------------------------
 
 $script:CurrentTxId = $null
@@ -323,7 +310,6 @@ function Set-SigTxState {
     Write-Sig "TX $TxId -> $State" -Tag 'TX'
 }
 
-# ---- Registry write ----
 function Invoke-SigRegistryWrite {
     param(
         [Parameter(Mandatory)][string]$TxId, [Parameter(Mandatory)][string]$Path,
@@ -388,7 +374,6 @@ function Invoke-SigRegistryWrite {
     return $mutationId
 }
 
-# ---- Fsutil write ----
 function Invoke-SigFsutilWrite {
     param([Parameter(Mandatory)][string]$TxId, [Parameter(Mandatory)][string]$Setting, [Parameter(Mandatory)][string]$NewValue)
     $mutationId = New-SigMutationId; $seq = Get-SigNextSequence -TxId $TxId
@@ -433,7 +418,6 @@ function Invoke-SigFsutilWrite {
     return $mutationId
 }
 
-# ---- Service state ----
 function Invoke-SigServiceWrite {
     param(
         [Parameter(Mandatory)][string]$TxId, [Parameter(Mandatory)][string]$Name,
@@ -467,7 +451,6 @@ function Invoke-SigServiceWrite {
     return $mutationId
 }
 
-# ---- Scheduled task ----
 function Invoke-SigScheduledTaskWrite {
     param(
         [Parameter(Mandatory)][string]$TxId, [Parameter(Mandatory)][string]$TaskPath,
@@ -489,7 +472,6 @@ function Invoke-SigScheduledTaskWrite {
         throw
     }
     $verify = Get-ScheduledTask -TaskPath $TaskPath -TaskName $TaskName
-    $expected = if ($Action -eq 'Disable') { 'Disabled' } else { 'Ready' }
     if ($verify.State.ToString() -ne $expected -and -not ($Action -eq 'Enable' -and $verify.State -in 'Ready','Running')) {
         Write-SigJournalEvent -TxId $TxId -MutationId $mutationId -Event 'VerifyFailed' -Sequence $seq -Kind 'ScheduledTask' -Target "$TaskPath$TaskName" -Detail "State=$($verify.State)"
         throw "Scheduled task $TaskPath$TaskName verify failed"
@@ -498,14 +480,12 @@ function Invoke-SigScheduledTaskWrite {
     return $mutationId
 }
 
-# ---- Power setting (via powercfg, per active scheme) ----
 function Invoke-SigPowerSettingWrite {
     param(
         [Parameter(Mandatory)][string]$TxId, [Parameter(Mandatory)][string]$SubGroup,
         [Parameter(Mandatory)][string]$Setting, [Parameter(Mandatory)][int]$AcValue
     )
     $mutationId = New-SigMutationId; $seq = Get-SigNextSequence -TxId $TxId
-    # Query prior
     $raw = & powercfg /query SCHEME_CURRENT $SubGroup $Setting 2>&1
     $acPrior = $null
     foreach ($line in $raw) {
@@ -526,7 +506,6 @@ function Invoke-SigPowerSettingWrite {
     return $mutationId
 }
 
-# ---- Rollback ----
 function Restore-SigTransaction {
     param([Parameter(Mandatory)][string]$TxId)
     $dir = Join-Path $script:SigmaTx $TxId
@@ -592,8 +571,9 @@ function Restore-SigTransaction {
                     Write-SigJournalEvent -TxId $TxId -MutationId $m.Id -Event 'RollbackSucceeded' -Sequence $m.Sequence -Kind 'Service' -Target $m.Target; $ok++
                 }
                 'ScheduledTask' {
-                    if ($m.Prior.State -ne 'Disabled') { Enable-ScheduledTask -TaskPath (Split-Path $m.Target -Parent) -TaskName (Split-Path $m.Target -Leaf) -EA SilentlyContinue | Out-Null }
-                    else { Disable-ScheduledTask -TaskPath (Split-Path $m.Target -Parent) -TaskName (Split-Path $m.Target -Leaf) -EA SilentlyContinue | Out-Null }
+                    $tp = Split-Path $m.Target -Parent; $tn = Split-Path $m.Target -Leaf
+                    if ($m.Prior.State -ne 'Disabled') { Enable-ScheduledTask -TaskPath $tp -TaskName $tn -EA SilentlyContinue | Out-Null }
+                    else { Disable-ScheduledTask -TaskPath $tp -TaskName $tn -EA SilentlyContinue | Out-Null }
                     Write-SigJournalEvent -TxId $TxId -MutationId $m.Id -Event 'RollbackSucceeded' -Sequence $m.Sequence -Kind 'ScheduledTask' -Target $m.Target; $ok++
                 }
                 'Power' {
@@ -632,7 +612,7 @@ function Save-SigPendingValidation {
 function Clear-SigPendingValidation { param([string]$TxId); $f = Join-Path $script:SigmaPend "$TxId.json"; if (Test-Path $f) { Remove-Item $f -Force -EA SilentlyContinue } }
 
 # -----------------------------------------------------------------------------
-# SECTION 5 - Evidence + hardware + counters + ETW (unchanged core)
+# SECTION 5 - Evidence + hardware + counters
 # -----------------------------------------------------------------------------
 
 function New-Evidence {
@@ -745,7 +725,7 @@ function Get-SigCounterSnapshot {
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 6 - Benchmark (with HTML output)
+# SECTION 6 - Benchmark
 # -----------------------------------------------------------------------------
 
 function Get-SigMedian { param([double[]]$Values); if (-not $Values -or $Values.Count -eq 0) { return $null }; $s = $Values | Sort-Object; $n = $s.Count; if ($n % 2 -eq 1) { return [double]$s[[int]($n/2)] }; ([double]$s[$n/2-1] + [double]$s[$n/2]) / 2.0 }
@@ -800,38 +780,28 @@ function Start-SigBenchmark {
         Label=$Label; Timestamp=(Get-Date).ToString('o')
         Machine=(Get-SigMachineProfile); CPU=$cpu
     }
-    # Machine-readable sidecar (needed by Compare-SigBenchmarks)
     $result | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $script:SigmaBm "$Label.json") -Encoding UTF8
 
-    # Human-facing HTML
-    $rows = @($cpu.Runs | ForEach-Object {
-        [PSCustomObject]@{ Run=$_.Run; 'Ops/sec'=$_.OpsPerSec }
-    })
+    $rows = @($cpu.Runs | ForEach-Object { [PSCustomObject]@{ Run=$_.Run; 'Ops/sec'=$_.OpsPerSec } })
     $stats = [ordered]@{
-        'Median (ops/sec)' = $cpu.MedianOpsPerSec
-        'Minimum'          = $cpu.MinOpsPerSec
-        'Maximum'          = $cpu.MaxOpsPerSec
-        'StdDev'           = $cpu.StdDevOpsPerSec
-        'Coefficient of Variation' = "$($cpu.CV_Percent) %"
+        'Median (ops/sec)'=$cpu.MedianOpsPerSec; 'Minimum'=$cpu.MinOpsPerSec
+        'Maximum'=$cpu.MaxOpsPerSec; 'StdDev'=$cpu.StdDevOpsPerSec
+        'Coefficient of Variation'="$($cpu.CV_Percent) %"
     }
     $body = @"
 <div class="card">
 <h2>Environment</h2>
 $(ConvertTo-SigHtmlKeyValue ([ordered]@{
-    'Label'=$Label
-    'CPU'=$result.Machine.CPUName
-    'CPU Vendor'=$result.Machine.CPUVendor
-    'RAM (GB)'=$result.Machine.TotalRAMGB
-    'Laptop'=$result.Machine.IsLaptop
-    'Sigma Version'=$script:SigmaVersion
-    'Benchmark Schema'=$script:BenchmarkSchemaVer
+    'Label'=$Label; 'CPU'=$result.Machine.CPUName; 'CPU Vendor'=$result.Machine.CPUVendor
+    'RAM (GB)'=$result.Machine.TotalRAMGB; 'Laptop'=$result.Machine.IsLaptop
+    'Sigma Version'=$script:SigmaVersion; 'Benchmark Schema'=$script:BenchmarkSchemaVer
 }))
 </div>
 <h2>CPU Consistency - Statistics</h2>
 $(ConvertTo-SigHtmlKeyValue $stats)
 <h2>Raw Runs</h2>
 $(ConvertTo-SigHtmlTable $rows)
-<p class="dim">The JSON sidecar (used by comparison) is at <code>$Label.json</code>.</p>
+<p class="dim">JSON sidecar (used by comparison) is at <code>$Label.json</code>.</p>
 "@
     $htmlPath = Join-Path $script:SigmaBm "$Label.html"
     ConvertTo-SigHtmlPage -Title "Sigma Benchmark - $Label" -Body $body -Subtitle "CPU consistency run" |
@@ -861,19 +831,19 @@ function Compare-SigBenchmarks {
                  elseif ($cpuCI.Significant -and $cpuCI.Direction -eq 'Regression') { "<span class='badge bad'>REGRESSION</span>" }
                  else { "<span class='badge warn'>INCONCLUSIVE</span>" }
         $body = @"
-<p>$badge  Compared <code>$BeforeLabel</code> vs <code>$AfterLabel</code></p>
+<p>$badge Compared <code>$BeforeLabel</code> vs <code>$AfterLabel</code></p>
 <h2>Result</h2>
 $(ConvertTo-SigHtmlKeyValue ([ordered]@{
-    'Before - Median (ops/sec)' = $b.CPU.MedianOpsPerSec
-    'After - Median (ops/sec)'  = $a.CPU.MedianOpsPerSec
-    'Delta (ops/sec)'           = $cpuCI.PointEstimate
-    'Delta (%)'                 = $deltaPct
-    '95% CI Low'                = $cpuCI.CI_Low
-    '95% CI High'               = $cpuCI.CI_High
-    'Statistically Significant' = $cpuCI.Significant
-    'Direction'                 = $cpuCI.Direction
-    'Before CV %'               = $b.CPU.CV_Percent
-    'After CV %'                = $a.CPU.CV_Percent
+    'Before - Median (ops/sec)'=$b.CPU.MedianOpsPerSec
+    'After - Median (ops/sec)'=$a.CPU.MedianOpsPerSec
+    'Delta (ops/sec)'=$cpuCI.PointEstimate
+    'Delta (%)'=$deltaPct
+    '95% CI Low'=$cpuCI.CI_Low
+    '95% CI High'=$cpuCI.CI_High
+    'Statistically Significant'=$cpuCI.Significant
+    'Direction'=$cpuCI.Direction
+    'Before CV %'=$b.CPU.CV_Percent
+    'After CV %'=$a.CPU.CV_Percent
 }))
 "@
         $htmlPath = Join-Path $script:SigmaBm ("compare_{0}_vs_{1}.html" -f $BeforeLabel, $AfterLabel)
@@ -885,62 +855,75 @@ $(ConvertTo-SigHtmlKeyValue ([ordered]@{
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 7 - Optimization catalog (~80 items)
+# SECTION 7 - Optimization catalog (constructors fixed)
 # -----------------------------------------------------------------------------
 
-# Compact constructors
 function New-RegOpt {
     param([string]$Id,[string]$Category,[string]$Title,[string]$Risk,[string]$Impact,
           [bool]$Reboot=$false,[string]$Path,[string]$Name,$Value,[string]$Type='DWord',
-          [scriptblock]$AppliesTo=$null,[string]$Note='')
+          [object]$AppliesTo=$null,[string]$Note='')
     $p=$Path;$n=$Name;$v=$Value;$t=$Type
+    if ($AppliesTo -is [string]) { if (-not $Note) { $Note = $AppliesTo }; $AppliesTo = $null }
+    if ($AppliesTo -isnot [scriptblock]) { $AppliesTo = { param($ctx) $true } }
     @{
         Id=$Id;Category=$Category;Title=$Title;Risk=$Risk;Impact=$Impact;RequiresReboot=$Reboot;Note=$Note
-        AppliesTo=if ($AppliesTo) { $AppliesTo } else { { param($ctx) $true } }
+        AppliesTo=$AppliesTo
         Apply={ param($TxId) Invoke-SigRegistryWrite -TxId $TxId -Path $p -Name $n -Value $v -Type $t | Out-Null }.GetNewClosure()
     }
 }
+
 function New-SvcOpt {
     param([string]$Id,[string]$Category,[string]$Title,[string]$Risk,[string]$Impact,
           [string]$ServiceName,[string]$StartType,[string]$Action='Leave',
-          [scriptblock]$AppliesTo=$null,[string]$Note='')
+          [object]$AppliesTo=$null,[string]$Note='')
     $sn=$ServiceName;$st=$StartType;$ac=$Action
+    if ($AppliesTo -is [string]) { if (-not $Note) { $Note = $AppliesTo }; $AppliesTo = $null }
+    if ($AppliesTo -isnot [scriptblock]) { $AppliesTo = { param($ctx) $true } }
     @{
         Id=$Id;Category=$Category;Title=$Title;Risk=$Risk;Impact=$Impact;RequiresReboot=$false;Note=$Note
-        AppliesTo=if ($AppliesTo) { $AppliesTo } else { { param($ctx) $true } }
+        AppliesTo=$AppliesTo
         Apply={ param($TxId) Invoke-SigServiceWrite -TxId $TxId -Name $sn -StartType $st -Action $ac | Out-Null }.GetNewClosure()
     }
 }
+
 function New-TaskOpt {
     param([string]$Id,[string]$Category,[string]$Title,[string]$Risk,[string]$Impact,
           [string]$TaskPath,[string]$TaskName,[string]$Action='Disable',
-          [scriptblock]$AppliesTo=$null,[string]$Note='')
+          [object]$AppliesTo=$null,[string]$Note='')
     $tp=$TaskPath;$tn=$TaskName;$act=$Action
+    if ($AppliesTo -is [string]) { if (-not $Note) { $Note = $AppliesTo }; $AppliesTo = $null }
+    if ($AppliesTo -isnot [scriptblock]) { $AppliesTo = { param($ctx) $true } }
     @{
         Id=$Id;Category=$Category;Title=$Title;Risk=$Risk;Impact=$Impact;RequiresReboot=$false;Note=$Note
-        AppliesTo=if ($AppliesTo) { $AppliesTo } else { { param($ctx) $true } }
+        AppliesTo=$AppliesTo
         Apply={ param($TxId) Invoke-SigScheduledTaskWrite -TxId $TxId -TaskPath $tp -TaskName $tn -Action $act | Out-Null }.GetNewClosure()
     }
 }
+
 function New-FsutilOpt {
     param([string]$Id,[string]$Category,[string]$Title,[string]$Risk,[string]$Impact,
           [bool]$Reboot=$false,[string]$Setting,[string]$NewValue,
-          [scriptblock]$AppliesTo=$null,[string]$Note='')
+          [object]$AppliesTo=$null,[string]$Note='')
     $s=$Setting;$nv=$NewValue
+    if ($AppliesTo -is [string]) { if (-not $Note) { $Note = $AppliesTo }; $AppliesTo = $null }
+    if ($AppliesTo -isnot [scriptblock]) { $AppliesTo = { param($ctx) $true } }
     @{
         Id=$Id;Category=$Category;Title=$Title;Risk=$Risk;Impact=$Impact;RequiresReboot=$Reboot;Note=$Note
-        AppliesTo=if ($AppliesTo) { $AppliesTo } else { { param($ctx) $true } }
+        AppliesTo=$AppliesTo
         Apply={ param($TxId) Invoke-SigFsutilWrite -TxId $TxId -Setting $s -NewValue $nv | Out-Null }.GetNewClosure()
     }
 }
+
 function New-PowerOpt {
     param([string]$Id,[string]$Category,[string]$Title,[string]$Risk,[string]$Impact,
           [string]$SubGroup,[string]$Setting,[int]$AcValue,
-          [scriptblock]$AppliesTo=$null,[string]$Note='')
+          [object]$AppliesTo=$null,[string]$Note='')
     $sg=$SubGroup;$st=$Setting;$ac=$AcValue
+    if ($AppliesTo -is [string]) { if (-not $Note) { $Note = $AppliesTo }; $AppliesTo = $null }
+    if ($AppliesTo -isnot [scriptblock]) { $AppliesTo = { param($ctx) $true } }
     @{
         Id=$Id;Category=$Category;Title=$Title;Risk=$Risk;Impact=$Impact;RequiresReboot=$false;Note=$Note
-        AppliesTo=if ($AppliesTo) { $AppliesTo } else { { param($ctx) $true } }
+        AppliesTo=$AppliesTo
         Apply={ param($TxId) Invoke-SigPowerSettingWrite -TxId $TxId -SubGroup $sg -Setting $st -AcValue $ac | Out-Null }.GetNewClosure()
     }
 }
@@ -954,9 +937,9 @@ function Get-SigOptimizationCatalog {
     $win10Plus   = { param($ctx) $ctx.OS.Build -ge 10240 }
 
     @(
-        # ===== 1. PRIVACY & TELEMETRY (master map: 41, 147, 150) =====
+        # ===== 1. PRIVACY & TELEMETRY (12) =====
         New-RegOpt 'Privacy_Telemetry_Minimum' 'Privacy' 'Set diagnostic data to Required only' 'Low' 'Privacy' $false `
-            'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry' 1 'DWord' $win10Plus 'AllowTelemetry=1 (Required). 0=off, 2=Enhanced, 3=Optional.'
+            'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' 'AllowTelemetry' 1 'DWord' $win10Plus 'AllowTelemetry=1 (Required).'
         New-RegOpt 'Privacy_AdvertisingID_Off' 'Privacy' 'Disable Advertising ID' 'Low' 'Privacy' $false `
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' 'Enabled' 0 'DWord'
         New-RegOpt 'Privacy_ActivityHistory_Off' 'Privacy' 'Disable Activity History publishing' 'Low' 'Privacy' $false `
@@ -980,7 +963,7 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'Privacy_Handwriting_Off' 'Privacy' 'Disable handwriting data sharing' 'Low' 'Privacy' $false `
             'HKCU:\Software\Microsoft\InputPersonalization' 'RestrictImplicitInkCollection' 1 'DWord'
 
-        # ===== 2. GAMING (master map: 10, 11, 137, 154, 155) =====
+        # ===== 2. GAMING (10) =====
         New-RegOpt 'Gaming_GameMode_On' 'Gaming' 'Enable Game Mode' 'Low' 'Low/Med' $false `
             'HKCU:\Software\Microsoft\GameBar' 'AutoGameModeEnabled' 1 'DWord' $win10Plus
         New-RegOpt 'Gaming_HAGS_On' 'Gaming' 'Enable Hardware-Accelerated GPU Scheduling' 'Medium' 'Medium' $true `
@@ -994,7 +977,7 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'Gaming_Network_Throttling_Off' 'Gaming' 'Disable network throttling index' 'Low' 'Latency' $false `
             'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' 'NetworkThrottlingIndex' 4294967295 'DWord'
         New-RegOpt 'Gaming_System_Responsiveness' 'Gaming' 'Set SystemResponsiveness to 10 for gaming' 'Medium' 'Gaming' $false `
-            'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' 'SystemResponsiveness' 10 'DWord' 'Decreases CPU reserved for background; gaming priority.'
+            'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' 'SystemResponsiveness' 10 'DWord' $null 'Decreases CPU reserved for background; gaming priority.'
         New-RegOpt 'Gaming_GPU_Priority' 'Gaming' 'Raise GPU priority for Games task' 'Low' 'Gaming' $false `
             'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games' 'GPU Priority' 8 'DWord'
         New-RegOpt 'Gaming_CPU_Priority' 'Gaming' 'Set Games task CPU priority to 6 (High)' 'Low' 'Gaming' $false `
@@ -1002,7 +985,7 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'Gaming_MMCSS_Games_Sched' 'Gaming' 'Set MMCSS Games Scheduling Category to High' 'Low' 'Gaming' $false `
             'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks\Games' 'Scheduling Category' 'High' 'String'
 
-        # ===== 3. INPUT LATENCY (master map: 11, 14, 15) =====
+        # ===== 3. INPUT LATENCY (8) =====
         New-RegOpt 'Input_Mouse_Accel_Off' 'Latency' 'Disable mouse pointer acceleration' 'Low' 'Latency' $false `
             'HKCU:\Control Panel\Mouse' 'MouseSpeed' '0' 'String'
         New-RegOpt 'Input_Mouse_Threshold1' 'Latency' 'Reset mouse acceleration threshold 1' 'Low' 'Latency' $false `
@@ -1020,7 +1003,7 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'Input_Win32_Priority' 'Latency' 'Set Win32 Priority Separation to 26 hex (fair short bursts)' 'Medium' 'Responsiveness' $true `
             'HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl' 'Win32PrioritySeparation' 38 'DWord' $desktopOnly '38 = hex 26. Favor foreground short bursts.'
 
-        # ===== 4. UI / EXPLORER (master map: 8, 26, 29, 30, 126, 146) =====
+        # ===== 4. UI / EXPLORER (10) =====
         New-RegOpt 'UI_Show_File_Extensions' 'Usability' 'Show file extensions in Explorer' 'Low' 'Security' $false `
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'HideFileExt' 0 'DWord'
         New-RegOpt 'UI_Show_Hidden_Files' 'Usability' 'Show hidden files' 'Low' 'Usability' $false `
@@ -1042,7 +1025,7 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'UI_Notification_Toasts_Off' 'UI' 'Disable notification toasts' 'Low' 'Focus' $false `
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\PushNotifications' 'ToastEnabled' 0 'DWord'
 
-        # ===== 5. STORAGE (master map: 24, 143) =====
+        # ===== 5. STORAGE (5) =====
         New-FsutilOpt 'Storage_DisableLastAccess' 'Storage' 'Disable NTFS last-access timestamp' 'Low' 'Storage' $true `
             'disablelastaccess' '1' $ssdOnly 'Reduces writes. Requires reboot.'
         New-FsutilOpt 'Storage_Disable8Dot3' 'Storage' 'Disable 8.3 filename generation' 'Low' 'Storage' $false `
@@ -1054,7 +1037,7 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'Storage_ThumbnailCache_On' 'Storage' 'Keep thumbnail caching enabled (Explorer)' 'Low' 'Usability' $false `
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'IconsOnly' 0 'DWord'
 
-        # ===== 6. POWER (master map: 45) =====
+        # ===== 6. POWER (6) =====
         New-RegOpt 'Power_FastStartup_Off_Laptop' 'Reliability' 'Disable Fast Startup (laptop)' 'Low' 'Reliability' $true `
             'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' 'HiberbootEnabled' 0 'DWord' $laptopOnly
         New-RegOpt 'Power_FastStartup_Off_Desktop' 'Reliability' 'Disable Fast Startup (desktop)' 'Low' 'Reliability' $true `
@@ -1068,17 +1051,17 @@ function Get-SigOptimizationCatalog {
         New-PowerOpt 'Power_Display_Timeout_AC' 'Power' 'Display timeout 30 min on AC' 'Low' 'Convenience' `
             '7516b95f-f776-4464-8c53-06167f40cc99' '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e' 1800
 
-        # ===== 7. NETWORK (master map: 20-22, 152, 153) =====
+        # ===== 7. NETWORK (4) =====
         New-RegOpt 'Net_Nagle_Off_PerInterface' 'Network' 'Reduce Nagle latency on TCP interfaces' 'Medium' 'Latency' $false `
-            'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces' 'TcpAckFrequency' 1 'DWord' 'Applies to active interfaces only after reboot.'
+            'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces' 'TcpAckFrequency' 1 'DWord' $null 'Applies to active interfaces only after reboot.'
         New-RegOpt 'Net_TcpNoDelay' 'Network' 'Enable TCPNoDelay on active interfaces' 'Medium' 'Latency' $false `
             'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces' 'TCPNoDelay' 1 'DWord'
         New-RegOpt 'Net_Disable_IPv6_Transition' 'Network' 'Disable IPv6 transition tech (Teredo, 6to4)' 'Low' 'Network' $false `
-            'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' 'DisabledComponents' 8 'DWord' 'Keeps IPv6 native; disables legacy tunneling only.'
+            'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' 'DisabledComponents' 8 'DWord' $null 'Keeps IPv6 native; disables legacy tunneling only.'
         New-RegOpt 'Net_DNS_Cache_Protect' 'Network' 'Increase DNS cache timeout value' 'Low' 'Network' $false `
             'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' 'MaxCacheTtl' 86400 'DWord'
 
-        # ===== 8. SERVICES (master map: 59) =====
+        # ===== 8. SERVICES (7) =====
         New-SvcOpt 'Svc_DiagTrack_Disable' 'Privacy' 'Disable Connected User Experiences & Telemetry' 'Medium' 'Privacy' `
             'DiagTrack' 'Disabled' 'Stop' $win10Plus 'Major telemetry service. Safe to disable for most home users.'
         New-SvcOpt 'Svc_dmwappush_Disable' 'Privacy' 'Disable WAP Push Message Routing Service' 'Low' 'Privacy' `
@@ -1094,7 +1077,7 @@ function Get-SigOptimizationCatalog {
         New-SvcOpt 'Svc_WSearch_Disable' 'Services' 'Disable Windows Search indexing' 'Medium' 'Perf' `
             'WSearch' 'Disabled' 'Stop' $desktopOnly 'Disables Start menu search of files. Only for users who do not need indexing.'
 
-        # ===== 9. SCHEDULED TASKS (master map: 60) =====
+        # ===== 9. SCHEDULED TASKS (5) =====
         New-TaskOpt 'Task_Compat_Appraiser' 'Privacy' 'Disable Compatibility Appraiser' 'Low' 'Privacy' `
             '\Microsoft\Windows\Application Experience\' 'Microsoft Compatibility Appraiser'
         New-TaskOpt 'Task_Program_Data_Updater' 'Privacy' 'Disable Program Data Updater' 'Low' 'Privacy' `
@@ -1106,7 +1089,7 @@ function Get-SigOptimizationCatalog {
         New-TaskOpt 'Task_Feedback_Siuf' 'Privacy' 'Disable Windows Feedback Siuf task' 'Low' 'Privacy' `
             '\Microsoft\Windows\Feedback\Siuf\' 'DmClient'
 
-        # ===== 10. DEBLOAT (master map: 117) =====
+        # ===== 10. DEBLOAT (5) =====
         New-RegOpt 'Debloat_Consumer_Features_Off' 'Debloat' 'Disable Windows consumer features (auto-app install)' 'Low' 'Privacy' $false `
             'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' 'DisableWindowsConsumerFeatures' 1 'DWord' $win10Plus
         New-RegOpt 'Debloat_Suggested_Apps_Off' 'Debloat' 'Disable suggested apps installs' 'Low' 'Privacy' $false `
@@ -1116,15 +1099,15 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'Debloat_Tips_Tricks_Off' 'Debloat' 'Disable Windows tips and tricks' 'Low' 'Privacy' $false `
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager' 'SoftLandingEnabled' 0 'DWord' $win10Plus
         New-RegOpt 'Debloat_OneDrive_Auto_Off' 'Debloat' 'Prevent OneDrive from auto-starting with Windows' 'Low' 'Privacy' $false `
-            'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 0 'DWord' $win10Plus 'Does not uninstall OneDrive; prevents it starting with the user session.'
+            'HKLM:\SOFTWARE\Policies\Microsoft\Windows\OneDrive' 'DisableFileSyncNGSC' 0 'DWord' $win10Plus 'Does not uninstall OneDrive; prevents auto-start.'
 
-        # ===== 11. AUDIO (master map: 18) =====
+        # ===== 11. AUDIO (2) =====
         New-RegOpt 'Audio_Enhancements_Off' 'Audio' 'Disable audio enhancements on default device' 'Low' 'Audio' $false `
-            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render' 'Disable_SysFx' 1 'DWord' 'Applies globally; takes effect after device re-enumeration.'
+            'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Render' 'Disable_SysFx' 1 'DWord' $null 'Applies globally; effective after device re-enumeration.'
         New-RegOpt 'Audio_Exclusive_Mode_Off' 'Audio' 'Disable exclusive mode preference for shared audio' 'Low' 'Audio' $false `
             'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Audio' 'ExclusiveMode' 0 'DWord'
 
-        # ===== 12. WINDOWS UPDATE CONTROL (master map: 2, 151) =====
+        # ===== 12. UPDATE CONTROL (4) =====
         New-RegOpt 'Update_Driver_WU_Off' 'Updates' 'Prevent automatic driver updates via Windows Update' 'Medium' 'Control' $false `
             'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching' 'SearchOrderConfig' 0 'DWord' $win10Plus 'Stops WU overwriting your good drivers.'
         New-RegOpt 'Update_Feature_Defer' 'Updates' 'Defer feature updates by 365 days' 'Medium' 'Control' $false `
@@ -1134,19 +1117,19 @@ function Get-SigOptimizationCatalog {
         New-RegOpt 'Update_Metered_On' 'Updates' 'Treat current connection as metered (slows WU)' 'Low' 'Control' $false `
             'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\NetworkList\DefaultMediaCost' '3' 2 'DWord' $win10Plus
 
-        # ===== 13. BOOT / LEGACY (master map: 6, 30) =====
+        # ===== 13. BOOT / LEGACY (2) =====
         New-RegOpt 'Boot_Timeout_Low' 'Boot' 'Reduce boot menu timeout to 3 seconds' 'Low' 'Boot' $false `
             'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' 'BootMenuTimeout' 3 'DWord'
         New-RegOpt 'UI_Classic_Context_Menu_Win11' 'UI' 'Restore classic right-click context menu (Win11)' 'Low' 'Usability' $false `
             'HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32' '' '' 'String' $win11Only
 
-        # ===== 14. EXPLORER PERFORMANCE =====
+        # ===== 14. EXPLORER PERFORMANCE (2) =====
         New-RegOpt 'Explorer_Disable_Recent_Files' 'UI' 'Do not track recent files in Quick Access' 'Low' 'Privacy' $false `
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Start_TrackDocs' 0 'DWord'
         New-RegOpt 'Explorer_Disable_Recent_Apps' 'UI' 'Do not track recent apps in Start' 'Low' 'Privacy' $false `
             'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Start_TrackProgs' 0 'DWord'
 
-        # ===== 15. END: informational only (no-ops used to show presence) =====
+        # ===== 15. META (1) =====
         New-RegOpt 'Meta_Sigma_Marker' 'Meta' 'Sigma Performance marker (no system change)' 'Low' 'Metadata' $false `
             'HKCU:\Software\SigmaPerformance' 'Installed' 1 'DWord' $win10Plus 'Timestamped marker; harmless.'
     )
@@ -1208,15 +1191,12 @@ function Invoke-SigOptimization {
     else { Set-SigTxState -TxId $txId -State 'PartiallyApplied' -Applied 0 -Failed $failed -RequiresReboot $false -RecoveryRequired $false -Optimizations @() }
 
     Write-SigJournalHash -TxId $txId
-
-    # HTML transaction report
     New-SigTxHtmlReport -TxId $txId | Out-Null
-
     [PSCustomObject]@{ TransactionId=$txId;Applied=$applied;RequiresReboot=$needsReboot;RecoveryRequired=$recoveryRequired }
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 8 - HTML transaction report
+# SECTION 8 - Transaction HTML report
 # -----------------------------------------------------------------------------
 
 function New-SigTxHtmlReport {
@@ -1227,14 +1207,10 @@ function New-SigTxHtmlReport {
     $journal = Join-Path $dir 'journal.jsonl'
     $events = @(if (Test-Path $journal) { Get-Content $journal | ForEach-Object { $_ | ConvertFrom-Json } })
 
-    # Summarize by mutation
     $mutations = @{}
     foreach ($e in $events) {
         if (-not $mutations.ContainsKey($e.MutationId)) {
-            $mutations[$e.MutationId] = [PSCustomObject]@{
-                MutationId=$e.MutationId; Kind=''; Target=''; Sequence=0
-                Events=@()
-            }
+            $mutations[$e.MutationId] = [PSCustomObject]@{ MutationId=$e.MutationId;Kind='';Target='';Sequence=0;Events=@() }
         }
         if ($e.Event -eq 'Capture') {
             $mutations[$e.MutationId].Kind = $e.Kind
@@ -1244,20 +1220,20 @@ function New-SigTxHtmlReport {
         $mutations[$e.MutationId].Events += $e.Event
     }
     $mutationRows = @($mutations.Values | Sort-Object Sequence | ForEach-Object {
-        [PSCustomObject]@{
-            Seq=$_.Sequence; Kind=$_.Kind; Target=$_.Target
-            'Events'=($_.Events -join ' -> ')
-        }
+        [PSCustomObject]@{ Seq=$_.Sequence;Kind=$_.Kind;Target=$_.Target;'Events'=($_.Events -join ' -> ') }
     })
 
     $statusBadge = switch ($meta.State) {
-        'Applied'              { "<span class='badge ok'>APPLIED</span>" }
-        'PartiallyApplied'     { "<span class='badge warn'>PARTIAL</span>" }
-        'RecoveryRequired'     { "<span class='badge bad'>RECOVERY REQUIRED</span>" }
-        'RolledBack'           { "<span class='badge info'>ROLLED BACK</span>" }
+        'Applied'                { "<span class='badge ok'>APPLIED</span>" }
+        'PartiallyApplied'       { "<span class='badge warn'>PARTIAL</span>" }
+        'RecoveryRequired'       { "<span class='badge bad'>RECOVERY REQUIRED</span>" }
+        'RolledBack'             { "<span class='badge info'>ROLLED BACK</span>" }
         'RollbackPartialFailure' { "<span class='badge bad'>ROLLBACK PARTIAL</span>" }
-        default                { "<span class='badge info'>$($meta.State)</span>" }
+        default                  { "<span class='badge info'>$($meta.State)</span>" }
     }
+
+    $optList = ''
+    if ($meta.Optimizations) { $optList = ($meta.Optimizations -join ', ') }
 
     $body = @"
 <p>$statusBadge</p>
@@ -1266,7 +1242,7 @@ $(ConvertTo-SigHtmlKeyValue ([ordered]@{
     'ID'=$meta.Id; 'State'=$meta.State; 'Started'=$meta.Started
     'Applied'=$meta.Applied; 'Failed'=$meta.Failed
     'Requires Reboot'=$meta.RequiresReboot; 'Recovery Required'=$meta.RecoveryRequired
-    'Optimizations'=($meta.Optimizations -join ', ')
+    'Optimizations'=$optList
 }))
 <h2>Mutations (execution order)</h2>
 $(ConvertTo-SigHtmlTable $mutationRows)
@@ -1311,14 +1287,12 @@ function Get-SigWinReState {
 
 function Get-SigResults_GroupA {
     $out = New-Object System.Collections.ArrayList
-    # Cat 1
     $nt = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $os = Get-CimInstance Win32_OperatingSystem
     $lic = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -EA SilentlyContinue | Select-Object -First 1
     $f = @(); if ($lic -and $lic.LicenseStatus -ne 1) { $f += "Windows not activated" }
     $s = if ($f.Count) { 'WARN' } else { 'OK' }
     $null = $out.Add((New-Evidence 'OS_INSTALL_001' 1 $s 3 0.95 'Installation' ($f -join '; ') -EvidenceLines $f -Data @{ Edition=$nt.EditionID; Build="$($os.BuildNumber).$($nt.UBR)"; Activation=$(if ($lic) { $lic.LicenseStatus } else { $null }) }))
-    # Cat 2
     $sd = "$env:WINDIR\SoftwareDistribution\Download"; $sdMB = 0
     if (Test-Path $sd) { $size = Get-ChildItem $sd -Recurse -File -EA SilentlyContinue | Measure-Object Length -Sum; if ($null -ne $size.Sum) { $sdMB = [math]::Round($size.Sum/1MB,1) } }
     $pending = 0; try { $ss=New-Object -ComObject Microsoft.Update.Session; $se=$ss.CreateUpdateSearcher(); $pending=$se.Search("IsInstalled=0 and IsHidden=0").Updates.Count } catch { }
@@ -1327,7 +1301,6 @@ function Get-SigResults_GroupA {
     if ($pending -gt 10) { $f += "$pending pending updates" }
     $s = if ($f.Count) { 'WARN' } else { 'OK' }
     $null = $out.Add((New-Evidence 'WU_STATE_001' 2 $s 3 0.95 'Windows Update' ($f -join '; ') -EvidenceLines $f -Data @{ CacheMB=$sdMB;Pending=$pending }))
-    # Cat 3
     $all = @(Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName })
     $old = @($all | Where-Object { $_.DriverDate -and ([datetime]$_.DriverDate) -lt (Get-Date).AddYears(-3) -and $_.DeviceName -match 'Display|Network|Audio|Storage' })
     $uns = @($all | Where-Object { -not $_.IsSigned })
@@ -1335,11 +1308,9 @@ function Get-SigResults_GroupA {
     if ($old.Count) { $f += "$($old.Count) display/network/audio/storage drivers older than 3 years"; $st = 'INFO' }
     if ($uns.Count) { $f += "$($uns.Count) unsigned drivers"; $st = 'WARN'; $sev = 4 }
     $null = $out.Add((New-Evidence 'DRV_AGE_001' 3 $st $sev 0.9 'Drivers' ($f -join '; ') -EvidenceLines $f -Data @{ Total=$all.Count;Old=$old;Unsigned=$uns }))
-    # Cat 4
     $prob = @(Get-PnpDevice -PresentOnly -EA SilentlyContinue | Where-Object { $_.Status -ne 'OK' -and $_.Status -ne 'Unknown' })
     $st = if ($prob.Count) { 'WARN' } else { 'OK' }
     $null = $out.Add((New-Evidence 'DEVMGR_001' 4 $st $(if ($prob.Count) { 6 } else { 0 }) 0.98 'Device Manager' $(if ($prob.Count) { "$($prob.Count) problem devices" } else { 'No problem devices' }) -EvidenceLines @($prob | ForEach-Object { "$($_.FriendlyName): $($_.ProblemDescription)" }) -Data @{ Problems=$prob }))
-    # Cat 5
     $efiInfo = Test-SigEfiSystemPresent
     $sb = $null; try { $sb = Confirm-SecureBootUEFI -EA Stop } catch { }
     $tpm = $null; try { $tpm = Get-Tpm -EA Stop } catch { }
@@ -1353,13 +1324,11 @@ function Get-SigResults_GroupA {
 
 function Get-SigResults_GroupB {
     $out = New-Object System.Collections.ArrayList
-    # Cat 6
     $winre = Get-SigWinReState
     $f = @(); $st = 'OK'; $sev = 0
     if ($winre.EnabledKnown -and -not $winre.Enabled) { $f += "WinRE disabled"; $st='WARN'; $sev=4 }
     elseif (-not $winre.EnabledKnown) { $f += "WinRE enabled state could not be verified"; $st='INFO' }
     $null = $out.Add((New-Evidence 'BOOT_STATE_001' 6 $st $sev 0.9 'Boot' ($f -join '; ') -EvidenceLines $f -Data @{ WinReInstalledKnown=$winre.InstalledKnown;WinReEnabledKnown=$winre.EnabledKnown;WinReEnabled=$winre.Enabled;WinReMethod=$winre.Method }))
-    # Cat 7
     $dumps = @(Get-ChildItem "$env:SystemRoot\Minidump" -Filter '*.dmp' -EA SilentlyContinue | Where-Object { $_.LastWriteTime -ge (Get-Date).AddDays(-30) })
     $whea = @(Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-WHEA-Logger';StartTime=(Get-Date).AddDays(-30)} -EA SilentlyContinue)
     $kp41 = @(Get-WinEvent -FilterHashtable @{LogName='System';Id=41;StartTime=(Get-Date).AddDays(-30)} -EA SilentlyContinue)
@@ -1373,17 +1342,15 @@ function Get-SigResults_GroupB {
     $st = 'OK'; $sev = 0
     if ($wheaFatal.Count) { $st='FAIL'; $sev=9 } elseif ($dumps.Count) { $st='FAIL'; $sev=7 } elseif ($kp41.Count -ge 3) { $st='WARN'; $sev=5 } elseif ($wheaCorr.Count -or $wheaOther.Count) { $st='WARN'; $sev=4 } elseif ($kp41.Count -eq 1) { $st='INFO'; $sev=2 }
     $null = $out.Add((New-Evidence 'STAB_BSOD_001' 7 $st $sev 0.85 'BSOD' ($f -join '; ') -EvidenceLines $f -Data @{ Minidumps=$dumps.Count;WHEA_Total=$whea.Count;WHEA_Fatal=$wheaFatal.Count;WHEA_Corrected=$wheaCorr.Count;WHEA_Unclassified=$wheaOther.Count;KernelPower41=$kp41.Count }))
-    # Cat 8
     $top = @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 15 Name,Id,@{n='RAM_MB';e={[math]::Round($_.WorkingSet64/1MB,1)}})
     $null = $out.Add((New-Evidence 'PERF_TOP_001' 8 'INFO' 0 1.0 'Processes' "$($top.Count) top processes" -Data @{ Top=$top }))
-    # Cat 9
     $cpu = Get-CimInstance Win32_Processor
     $null = $out.Add((New-Evidence 'CPU_STATE_001' 9 'INFO' 0 1.0 'CPU' $cpu.Name -Data @{ Cores=$cpu.NumberOfCores;Threads=$cpu.NumberOfLogicalProcessors }))
     return $out
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 10 - HTML scan report
+# SECTION 10 - Scan HTML report
 # -----------------------------------------------------------------------------
 
 function New-SigScanHtmlReport {
@@ -1391,13 +1358,7 @@ function New-SigScanHtmlReport {
     $ok=0; $warn=0; $fail=0
     foreach ($e in $Evidence) { switch ($e.Status) { 'OK'{$ok++} 'WARN'{$warn++} 'FAIL'{$fail++} } }
     $rows = @($Evidence | Sort-Object Category | ForEach-Object {
-        [PSCustomObject]@{
-            '#'=$_.Category
-            'Detector'=$_.DetectorId
-            'Status'=$_.Status
-            'Conf'=[math]::Round($_.Confidence,2)
-            'Finding'=$_.Finding
-        }
+        [PSCustomObject]@{ '#'=$_.Category;'Detector'=$_.DetectorId;'Status'=$_.Status;'Conf'=[math]::Round($_.Confidence,2);'Finding'=$_.Finding }
     })
     $hw = [ordered]@{
         'Manufacturer'=$Hardware.Profile.Manufacturer; 'Model'=$Hardware.Profile.Model
@@ -1463,7 +1424,7 @@ try {
     Write-Host "========== DETECT ==========" -ForegroundColor Green
     $evidence = New-Object System.Collections.ArrayList
     foreach ($fn in 'Get-SigResults_GroupA','Get-SigResults_GroupB') {
-        try { $r = & $fn; foreach ($e in $r) { $null = $evidence.Add($e) }; Write-Host "  $fn -> $($r.Count)" -ForegroundColor Green }
+        try { $r = & $fn; foreach ($e in $r) { $null = $evidence.Add($e) }; Write-Host "  $fn -> $(@($r).Count)" -ForegroundColor Green }
         catch { Write-Host "  $fn ERROR: $_" -ForegroundColor Red; Add-SigError "$fn failed: $_" }
     }
 
@@ -1487,11 +1448,13 @@ try {
 
     $byCat = $applicable | Group-Object Category
     $idx = 0
+    $flat = @()
     foreach ($grp in $byCat) {
         Write-Host ""
         Write-Host "  [$($grp.Name)]" -ForegroundColor Magenta
         foreach ($opt in $grp.Group) {
             $idx++
+            $flat += $opt
             $rebootTag = if ($opt.RequiresReboot) { ' [reboot]' } else { '' }
             Write-Host ("    [{0,3}] {1}  ({2}/{3}){4}" -f $idx, $opt.Title, $opt.Risk, $opt.Impact, $rebootTag)
         }
@@ -1500,7 +1463,6 @@ try {
     $optChoice = Read-Host "`nApply optimizations?"
     $txId = $null; $txRequiresReboot = $false; $txRecoveryRequired = $false
     if ($optChoice -and $optChoice -ne 'none') {
-        $flat = @($byCat | ForEach-Object { $_.Group })
         $ids = @()
         if ($optChoice -eq 'all') { $ids = $flat.Id }
         else {
