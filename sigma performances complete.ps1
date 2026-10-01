@@ -28,15 +28,14 @@ function Complete-SubProgress { param([string]$Activity) Write-Progress -Id 1 -P
 
 # -----------------------------------------------------------------------------
 # Registry helpers  (provider-path conversion -> works without PSDrive)
+# Using -LiteralPath so '*' is treated literally (huge speed fix for HKCR:\*)
 # -----------------------------------------------------------------------------
 $script:errorLog = "$env:TEMP\sigma_registry_errors.log"
 
 function Convert-RegPath {
     param([string]$Path)
     if ([string]::IsNullOrEmpty($Path)) { return $Path }
-    # Already a provider path
     if ($Path -like 'Registry::*') { return $Path }
-    # Convert short hive names to provider paths
     if ($Path -match '^(?i)HKU:\\?(.*)$')  { return "Registry::HKEY_USERS\$($Matches[1])" }
     if ($Path -match '^(?i)HKCR:\\?(.*)$') { return "Registry::HKEY_CLASSES_ROOT\$($Matches[1])" }
     if ($Path -match '^(?i)HKLM:\\?(.*)$') { return "Registry::HKEY_LOCAL_MACHINE\$($Matches[1])" }
@@ -49,8 +48,8 @@ function Set-RV {
     param([string]$Path, [string]$Name, $Value, [string]$Type = "DWord")
     $rp = Convert-RegPath $Path
     try {
-        if (-not (Test-Path $rp)) { New-Item -Path $rp -Force | Out-Null }
-        New-ItemProperty -Path $rp -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $rp)) { New-Item -Path $rp -Force | Out-Null }
+        New-ItemProperty -LiteralPath $rp -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
     } catch { Add-Content -Path $script:errorLog -Value "SET $Path\$Name : $($_.Exception.Message)" }
 }
 
@@ -58,15 +57,15 @@ function Set-RVdef {
     param([string]$Path, $Value, [string]$Type = "String")
     $rp = Convert-RegPath $Path
     try {
-        if (-not (Test-Path $rp)) { New-Item -Path $rp -Force | Out-Null }
-        if ($Type -eq "String") { Set-Item -Path $rp -Value $Value -Force -ErrorAction Stop }
+        if (-not (Test-Path -LiteralPath $rp)) { New-Item -Path $rp -Force | Out-Null }
+        if ($Type -eq "String") { Set-Item -LiteralPath $rp -Value $Value -Force -ErrorAction Stop }
     } catch { Add-Content -Path $script:errorLog -Value "DEF $Path : $($_.Exception.Message)" }
 }
 
 function Remove-RK {
     param([string]$Path)
     $rp = Convert-RegPath $Path
-    try { if (Test-Path $rp) { Remove-Item -Path $rp -Recurse -Force -ErrorAction Stop } }
+    try { if (Test-Path -LiteralPath $rp) { Remove-Item -LiteralPath $rp -Recurse -Force -ErrorAction Stop } }
     catch { Add-Content -Path $script:errorLog -Value "DEL $Path : $($_.Exception.Message)" }
 }
 
@@ -246,8 +245,8 @@ function Set-RegistryValue {
     param([string]$Path, [string]$Name, $Value, [string]$Type)
     $rp = Convert-RegPath $Path
     try {
-        if (-not (Test-Path $rp)) { New-Item -Path $rp -Force | Out-Null }
-        New-ItemProperty -Path $rp -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+        if (-not (Test-Path -LiteralPath $rp)) { New-Item -Path $rp -Force | Out-Null }
+        New-ItemProperty -LiteralPath $rp -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
     } catch { Add-Content -Path $errorLog -Value $_.Exception.Message }
 }
 
