@@ -2,36 +2,18 @@
 #Requires -RunAsAdministrator
 
 # =============================================================================
-# SIGMA PERFORMANCE v0.8
-# v0.7 review fixes:
-#  [P1] CompensationSucceeded / CompensationFailed are separate states
-#  [P2] ApplySucceeded emitted immediately after mutation, before verify
-#  [P3] RecoveryRequired transaction state; batch halts on compensation failure
-#  [P4] Idle gate: counter failure != 0% load
-#  [3]  Transaction IDs include milliseconds + random suffix
-#  [4]  Named mutex prevents concurrent Sigma sessions
-#  [6]  Manifest with journal + metadata hashes
-#  [7]  Idle gate known-state tracked
-#  [9]  WinRE registry described as heuristic, not authoritative
-#  [10] WinReConfigured != Enabled
-#  [11] WHEA classification labelled heuristic
-#  [12] WHEA unclassified bucket
-#  [13] AlreadyRolledBack recognized
-#  [14] Rollback candidates: Applied (CompensationSucceeded=false, RolledBack=false)
-#  [15] RecoveryRequired at transaction level
-#  [16] SigmaCriticalMutationException halts batch
-#  [19] DiskSpd preconditioning separated from measurement
-#  [20] Idle gate metadata saved to benchmark
-#  [21] Environment guards in comparison
-#  [22] CPUComparisonValid / DiskComparisonValid split
-#  [23] SHA objects disposed in finally
+# SIGMA PERFORMANCE v0.8.1
+# v0.8.0 → v0.8.1:
+#  [FIX] Set-StrictMode downgraded to 1.0 (property-existence checks caused
+#        "$null.Count" to throw on empty Pending folder)
+#  [FIX] All pipeline-result variables now @()-wrapped before .Count access
 # =============================================================================
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference    = 'SilentlyContinue'
-Set-StrictMode -Version 2.0
+Set-StrictMode -Version 1.0
 
-$script:SigmaVersion       = '0.8.0'
+$script:SigmaVersion       = '0.8.1'
 $script:BenchmarkSchemaVer = 4
 $script:TransactionSchema  = 4
 $script:RulesVersion       = 1
@@ -52,7 +34,7 @@ $confirm = Read-Host "Proceed? (Y/N)"
 if ($confirm -notin 'Y','y') { Write-Host "Exiting." -ForegroundColor Cyan; exit 0 }
 
 # -----------------------------------------------------------------------------
-# SECTION 1 - Infrastructure + singleton mutex (Fix #4)
+# SECTION 1 - Infrastructure + singleton mutex
 # -----------------------------------------------------------------------------
 
 $script:SigmaRoot = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -69,7 +51,7 @@ foreach ($d in @($script:SigmaData,$script:SigmaLog,$script:SigmaTx,$script:Sigm
 }
 if (Test-Path $script:ErrorLog) { Remove-Item $script:ErrorLog -Force -EA SilentlyContinue }
 
-# Fix #4: process-wide mutex (only one Sigma mutation engine at a time)
+# Process-wide mutex — only one Sigma mutation engine at a time
 $script:SigmaMutex = $null
 function Acquire-SigMutex {
     try {
@@ -80,7 +62,6 @@ function Acquire-SigMutex {
         }
         $script:SigmaMutex = $m
     } catch [System.Threading.AbandonedMutexException] {
-        # Previous process died holding it; we now own it.
         $script:SigmaMutex = $m
     } catch {
         throw "Failed to acquire Sigma mutex: $_"
@@ -94,7 +75,6 @@ function Release-SigMutex {
     }
 }
 Acquire-SigMutex
-# Cleanup on exit
 trap { Release-SigMutex; break }
 
 function Write-Sig {
@@ -124,22 +104,14 @@ function Add-SigError {
     Add-Content -Path $script:ErrorLog -Value "$(Get-Date -Format 'HH:mm:ss') $Message" -Encoding UTF8 -EA SilentlyContinue
 }
 
-# Custom exception (Fix #16)
+# Custom exception for critical mutation failures
 class SigmaCriticalMutationException : System.Exception {
     SigmaCriticalMutationException([string]$message) : base($message) { }
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 2 - Journal (with new event types; Fix #2, #5, #6)
+# SECTION 2 - Journal
 # -----------------------------------------------------------------------------
-
-$script:SigJournalEventTypes = @(
-    'Capture','ApplyAttempted','ApplySucceeded',
-    'VerifySucceeded','VerifyFailed',
-    'CompensationAttempted','CompensationSucceeded','CompensationFailed',
-    'RollbackAttempted','RollbackSucceeded','RollbackFailed',
-    'Note'
-)
 
 function Write-SigJournalEvent {
     param(
@@ -179,7 +151,6 @@ function Write-SigJournalEvent {
 }
 
 function Get-SigNextSequence {
-    # Per-transaction monotonic sequence.
     param([Parameter(Mandatory)][string]$TxId)
     $dir = Join-Path $script:SigmaTx $TxId
     $seqFile = Join-Path $dir 'sequence.txt'
@@ -194,7 +165,6 @@ function Get-SigNextSequence {
 }
 
 function Write-SigJournalHash {
-    # Fix #23: SHA disposed. Fix #6: also writes a manifest.
     param([Parameter(Mandatory)][string]$TxId)
     $dir = Join-Path $script:SigmaTx $TxId
     $journal = Join-Path $dir 'journal.jsonl'
@@ -246,7 +216,7 @@ function Test-SigJournalIntegrity {
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 3 - Transaction engine (Fix #3, #15)
+# SECTION 3 - Transaction engine
 # -----------------------------------------------------------------------------
 
 $script:CurrentTxId = $null
@@ -256,7 +226,6 @@ function New-SigMutationId {
 }
 
 function Start-SigTransaction {
-    # Fix #3: timestamp with ms + random suffix
     param([string]$Name)
     $id = "tx_{0}_{1}_{2}" -f `
         (Get-Date -Format 'yyyyMMdd_HHmmss_fff'), `
@@ -316,13 +285,10 @@ function Set-SigTxState {
     if ($PSBoundParameters.ContainsKey('Optimizations'))    { $meta.Optimizations = $Optimizations }
     $meta | Add-Member -NotePropertyName 'LastStateChange' -NotePropertyValue (Get-Date).ToString('o') -Force
     $meta | ConvertTo-Json -Depth 4 | Set-Content $metaFile -Encoding UTF8
-    Write-Sig "TX $TxId → $State" -Tag 'TX'
+    Write-Sig "TX $TxId -> $State" -Tag 'TX'
 }
 
 function Invoke-SigRegistryWrite {
-    # Fix #2: ApplySucceeded immediately after command, before verify.
-    # Fix #1: CompensationSucceeded/CompensationFailed are separate.
-    # Fix #15: On compensation failure, mark RecoveryRequired and throw critical.
     param(
         [Parameter(Mandatory)][string]$TxId,
         [Parameter(Mandatory)][string]$Path,
@@ -335,7 +301,7 @@ function Invoke-SigRegistryWrite {
     $mutationId = New-SigMutationId
     $seq = Get-SigNextSequence -TxId $TxId
 
-    # ---- Capture ----
+    # Capture prior state
     $keyExisted = Test-Path $Path
     $valueExisted = $false
     $priorVal  = $null
@@ -354,22 +320,19 @@ function Invoke-SigRegistryWrite {
         -Prior @{ KeyExisted=$keyExisted; ValueExisted=$valueExisted; Value=$priorVal; ValueKind=$priorKind } `
         -New   @{ Value=$Value; Type=$Type }
 
-    # ---- Apply attempt ----
     Write-SigJournalEvent -TxId $TxId -MutationId $mutationId -Event 'ApplyAttempted' -Sequence $seq -Kind 'Registry' -Target "$Path::$Name"
 
-    $applySucceeded = $false
+    # Apply
     try {
         if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
         New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force -EA Stop | Out-Null
-        $applySucceeded = $true
         Write-SigJournalEvent -TxId $TxId -MutationId $mutationId -Event 'ApplySucceeded' -Sequence $seq -Kind 'Registry' -Target "$Path::$Name"
     } catch {
         Write-SigJournalEvent -TxId $TxId -MutationId $mutationId -Event 'VerifyFailed' -Sequence $seq -Kind 'Registry' -Target "$Path::$Name" -Detail "Apply command failed: $_"
-        # Command failed → no mutation happened → nothing to compensate
         throw
     }
 
-    # ---- Verify ----
+    # Verify
     $verifyOk = $false
     try {
         $verify = (Get-ItemProperty -Path $Path -Name $Name -EA Stop).$Name
@@ -380,7 +343,6 @@ function Invoke-SigRegistryWrite {
     } catch {
         Write-SigJournalEvent -TxId $TxId -MutationId $mutationId -Event 'VerifyFailed' -Sequence $seq -Kind 'Registry' -Target "$Path::$Name" -Detail "$_"
 
-        # ---- Compensation ----
         Write-SigJournalEvent -TxId $TxId -MutationId $mutationId -Event 'CompensationAttempted' -Sequence $seq -Kind 'Registry' -Target "$Path::$Name"
         $compensated = $false
         try {
@@ -407,7 +369,6 @@ function Invoke-SigRegistryWrite {
         }
 
         if (-not $compensated) {
-            # Fix #15: mark transaction, throw critical exception to halt batch
             Set-SigTxState -TxId $TxId -State 'RecoveryRequired' -RecoveryRequired $true
             throw [SigmaCriticalMutationException]::new(
                 "Registry mutation $Path::$Name could not be verified OR compensated. Transaction $TxId is in RecoveryRequired.")
@@ -419,7 +380,6 @@ function Invoke-SigRegistryWrite {
 }
 
 function Invoke-SigFsutilWrite {
-    # Same pattern as registry.
     param(
         [Parameter(Mandatory)][string]$TxId,
         [Parameter(Mandatory)][string]$Setting,
@@ -487,11 +447,6 @@ function Invoke-SigFsutilWrite {
 }
 
 function Restore-SigTransaction {
-    # Fix #1: distinguishes CompensationSucceeded from CompensationFailed
-    # Fix #8: respects RolledBack
-    # Fix #9: no handler counts as failure
-    # Fix #13: AlreadyRolledBack when nothing to do
-    # Fix #14: rollback candidates are Applied mutations that are not (CompensationSucceeded or RolledBack)
     param([Parameter(Mandatory)][string]$TxId)
 
     $dir = Join-Path $script:SigmaTx $TxId
@@ -507,7 +462,7 @@ function Restore-SigTransaction {
     $journal = Join-Path $dir 'journal.jsonl'
     if (-not (Test-Path $journal)) { Write-Sig "Empty journal: $TxId" -Level WARN -Tag 'TX'; return }
 
-    $events = Get-Content $journal | ForEach-Object { $_ | ConvertFrom-Json }
+    $events = @(Get-Content $journal | ForEach-Object { $_ | ConvertFrom-Json })
 
     $mutations = @{}
     foreach ($e in $events) {
@@ -534,17 +489,15 @@ function Restore-SigTransaction {
         }
     }
 
-    # Fix #14: rollback candidates
-    $toRestore = $mutations.Values |
+    $toRestore = @($mutations.Values |
         Where-Object {
             $_.Applied -and
             -not $_.CompensationSucceeded -and
             -not $_.RolledBack
         } |
-        Sort-Object Sequence -Descending
+        Sort-Object Sequence -Descending)
 
-    if (-not $toRestore -or @($toRestore).Count -eq 0) {
-        # Fix #13
+    if ($toRestore.Count -eq 0) {
         Write-Sig "No active mutations remain to rollback for $TxId." -Level OK -Tag 'TX'
         Set-SigTxState -TxId $TxId -State 'AlreadyRolledBack'
         return
@@ -602,7 +555,7 @@ function Restore-SigTransaction {
             }
         } catch {
             Write-SigJournalEvent -TxId $TxId -MutationId $m.Id -Event 'RollbackFailed' -Sequence $m.Sequence -Kind $m.Kind -Target $m.Target -Detail "$_"
-            Write-Sig "Rollback entry failed: $($m.Kind) $($m.Target) — $_" -Level ERROR -Tag 'TX'
+            Write-Sig "Rollback entry failed: $($m.Kind) $($m.Target) -- $_" -Level ERROR -Tag 'TX'
             $failCount++
         }
     }
@@ -616,7 +569,8 @@ function Restore-SigTransaction {
 
 function Get-SigPendingTxIds {
     if (-not (Test-Path $script:SigmaPend)) { return @() }
-    Get-ChildItem $script:SigmaPend -Filter '*.json' -EA SilentlyContinue | ForEach-Object { $_.BaseName }
+    return @(Get-ChildItem $script:SigmaPend -Filter '*.json' -EA SilentlyContinue |
+        ForEach-Object { $_.BaseName })
 }
 
 function Save-SigPendingValidation {
@@ -692,10 +646,10 @@ function Test-SigLikelyHybridCpu {
     $patterns = @('12th Gen Intel','13th Gen Intel','14th Gen Intel','Core Ultra','Core 5 1','Core 7 1','Core 9 1')
     foreach ($p in $patterns) { if ($name -match $p) { return $true } }
     try {
-        $cim = Get-CimInstance Win32_Processor -EA Stop
+        $cim = @(Get-CimInstance Win32_Processor -EA Stop)
         if ($cim.PSObject.Properties.Name -contains 'EfficiencyClass') {
             $classes = @($cim | Select-Object -ExpandProperty EfficiencyClass -EA SilentlyContinue)
-            if (($classes | Sort-Object -Unique).Count -gt 1) { return $true }
+            if ((@($classes | Sort-Object -Unique)).Count -gt 1) { return $true }
         }
     } catch { }
     return $false
@@ -721,39 +675,39 @@ function Get-SigHardwareInventory {
     $profile = Get-SigMachineProfile
     $mb   = Get-CimInstance Win32_BaseBoard -EA SilentlyContinue
     $bios = Get-CimInstance Win32_BIOS -EA SilentlyContinue
-    $mem  = Get-CimInstance Win32_PhysicalMemory
+    $mem  = @(Get-CimInstance Win32_PhysicalMemory)
     $arr  = Get-CimInstance Win32_PhysicalMemoryArray
-    $gpus = Get-CimInstance Win32_VideoController
-    $disks = Get-PhysicalDisk -EA SilentlyContinue
-    $net  = Get-NetAdapter -Physical -EA SilentlyContinue
+    $gpus = @(Get-CimInstance Win32_VideoController)
+    $disks = @(Get-PhysicalDisk -EA SilentlyContinue)
+    $net  = @(Get-NetAdapter -Physical -EA SilentlyContinue)
 
-    $memModules = $mem | ForEach-Object {
+    $memModules = @($mem | ForEach-Object {
         [PSCustomObject]@{ Bank=$_.BankLabel; Loc=$_.DeviceLocator; GB=[math]::Round($_.Capacity / 1GB, 0)
             Rated=$_.Speed; Running=$_.ConfiguredClockSpeed; Mfr=$_.Manufacturer; Part=($_.PartNumber -replace '\s+$','') }
-    }
+    })
 
     [PSCustomObject]@{
         Timestamp = (Get-Date).ToString('o'); SigmaVersion = $script:SigmaVersion; Profile = $profile
         Motherboard = [PSCustomObject]@{ Mfr=$mb.Manufacturer; Product=$mb.Product; Version=$mb.Version }
         BIOS = [PSCustomObject]@{ Vendor=$bios.Manufacturer; Version=$bios.SMBIOSBIOSVersion; Date=$bios.ReleaseDate }
-        CPUs = Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentClockSpeed,SocketDesignation
+        CPUs = @(Get-CimInstance Win32_Processor | Select-Object Name,NumberOfCores,NumberOfLogicalProcessors,MaxClockSpeed,CurrentClockSpeed,SocketDesignation)
         Memory = [PSCustomObject]@{
-            TotalGB = [math]::Round(($mem|Measure-Object Capacity -Sum).Sum/1GB,0)
+            TotalGB = [math]::Round((@($mem) | Measure-Object Capacity -Sum).Sum/1GB,0)
             Modules = $memModules; Slots = $arr.MemoryDevices
-            MultipleModulesDetected = (($memModules.Loc | Sort-Object -Unique).Count -ge 2)
-            ConfiguredBelowReportedModuleSpeed = (($memModules | Where-Object { $_.Running -lt $_.Rated }).Count -gt 0)
+            MultipleModulesDetected = ((@($memModules.Loc | Sort-Object -Unique)).Count -ge 2)
+            ConfiguredBelowReportedModuleSpeed = ((@($memModules | Where-Object { $_.Running -lt $_.Rated })).Count -gt 0)
         }
-        GPUs = $gpus | Select-Object Name,DriverVersion,DriverDate,CurrentHorizontalResolution,CurrentVerticalResolution,CurrentRefreshRate,Status
-        Storage = $disks | ForEach-Object {
+        GPUs = @($gpus | Select-Object Name,DriverVersion,DriverDate,CurrentHorizontalResolution,CurrentVerticalResolution,CurrentRefreshRate,Status)
+        Storage = @($disks | ForEach-Object {
             $rel = $null; try { $rel = $_ | Get-StorageReliabilityCounter -EA Stop } catch { }
             [PSCustomObject]@{ Number=$_.DeviceId; Name=$_.FriendlyName; Media=$_.MediaType; Bus=$_.BusType
                 SizeGB=[math]::Round($_.Size/1GB,1); Health=$_.HealthStatus
                 Temp=$rel.Temperature; Wear=$rel.Wear; PowerOn=$rel.PowerOnHours }
-        }
-        Network = $net | ForEach-Object {
+        })
+        Network = @($net | ForEach-Object {
             [PSCustomObject]@{ Name=$_.Name; Desc=$_.InterfaceDescription; Status=$_.Status
                 LinkSpeed=$_.LinkSpeed; DriverVersion=$_.DriverVersion; DriverDate=$_.DriverDate }
-        }
+        })
     }
 }
 
@@ -801,7 +755,7 @@ function Get-SigEventStream {
                     Message=(($_.Message -split "`n")[0]).Trim() })
             }
     } catch { }
-    $events | Sort-Object Time
+    return @($events | Sort-Object Time)
 }
 
 function Get-SigCorrelationScore {
@@ -824,7 +778,7 @@ function Get-SigCorrelations {
     $out = New-Object System.Collections.ArrayList
     foreach ($s in ($Events | Where-Object { $_.Category -in $symptomCats })) {
         $windowStart = $s.Time.AddSeconds(-$WindowSeconds)
-        $candidates = $Events | Where-Object { $_.Category -in $causeCats -and $_.Time -ge $windowStart -and $_.Time -le $s.Time }
+        $candidates = @($Events | Where-Object { $_.Category -in $causeCats -and $_.Time -ge $windowStart -and $_.Time -le $s.Time })
         foreach ($c in $candidates) {
             $delta = [math]::Round(($s.Time - $c.Time).TotalSeconds, 1)
             $score = Get-SigCorrelationScore -Cause $c -Symptom $s -DeltaSec $delta
@@ -836,11 +790,11 @@ function Get-SigCorrelations {
             })
         }
     }
-    $out | Sort-Object CorrelationScore -Descending
+    return @($out | Sort-Object CorrelationScore -Descending)
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 8 - WinRE (Fix #9, #10)
+# SECTION 8 - WinRE / EFI
 # -----------------------------------------------------------------------------
 
 function Get-SigWinReState {
@@ -859,7 +813,6 @@ function Get-SigWinReState {
             $hasConfigured = ($item.PSObject.Properties.Name -contains 'WinReConfigured') -and ($null -ne $item.WinReConfigured)
 
             if ($hasDisabled) {
-                # Fix #9: registry heuristic, not authoritative
                 $result.InstalledKnown = $true
                 $result.Installed = $true
                 $result.EnabledKnown = $true
@@ -871,7 +824,6 @@ function Get-SigWinReState {
                 return $result
             }
             if ($hasConfigured) {
-                # Fix #10: do NOT infer Enabled from Configured
                 $result.InstalledKnown = $true
                 $result.Installed = [bool]$item.WinReConfigured
                 $result.ConfiguredKnown = $true
@@ -908,8 +860,8 @@ function Test-SigEfiSystemPresent {
         $pf = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control' -Name 'PEFirmwareType' -EA Stop).PEFirmwareType
         $isUefi = ($pf -eq 2)
     } catch { }
-    $efi = Get-Partition -EA SilentlyContinue | Where-Object { $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' }
-    [PSCustomObject]@{ IsUefi=$isUefi; HasEfi=[bool]$efi; EfiPartition=$efi }
+    $efi = @(Get-Partition -EA SilentlyContinue | Where-Object { $_.GptType -eq '{c12a7328-f81f-11d2-ba4b-00a0c93ec93b}' })
+    [PSCustomObject]@{ IsUefi=$isUefi; HasEfi=($efi.Count -gt 0); EfiPartition=$efi }
 }
 
 # -----------------------------------------------------------------------------
@@ -931,29 +883,31 @@ function Get-SigCounterSnapshot {
             Note='No DPC/ISR counters resolved.'; Totals=@() }
     }
 
-    try { $result = Get-Counter -Counter ($resolved.Path) -SampleInterval $IntervalSeconds -MaxSamples $samples -EA Stop }
+    try { $result = Get-Counter -Counter ($resolved | ForEach-Object { $_.Path }) -SampleInterval $IntervalSeconds -MaxSamples $samples -EA Stop }
     catch { return [PSCustomObject]@{ Timestamp=(Get-Date).ToString('o'); Verdict='UNAVAILABLE'; Note="Get-Counter: $($_.Exception.Message)"; Totals=@() } }
 
-    $totals = foreach ($r in $resolved) {
+    $totals = @(foreach ($r in $resolved) {
         $vals = @($result.CounterSamples | Where-Object Path -eq $r.Path | ForEach-Object { [double]$_.CookedValue })
         if ($vals.Count -eq 0) { continue }
         [PSCustomObject]@{ Id = $r.Id; Path = $r.Path
             Avg = [math]::Round(($vals | Measure-Object -Average).Average, 3)
             Max = [math]::Round(($vals | Measure-Object -Maximum).Maximum, 3) }
-    }
+    })
 
-    $maxDpc = ($totals | Where-Object Id -eq 'DPC_TIME' | Select-Object -ExpandProperty Max -EA SilentlyContinue)
-    $maxIsr = ($totals | Where-Object Id -eq 'ISR_TIME' | Select-Object -ExpandProperty Max -EA SilentlyContinue)
+    $maxDpcArr = @($totals | Where-Object Id -eq 'DPC_TIME' | Select-Object -ExpandProperty Max -EA SilentlyContinue)
+    $maxIsrArr = @($totals | Where-Object Id -eq 'ISR_TIME' | Select-Object -ExpandProperty Max -EA SilentlyContinue)
+    $maxDpc = if ($maxDpcArr.Count -gt 0) { $maxDpcArr[0] } else { $null }
+    $maxIsr = if ($maxIsrArr.Count -gt 0) { $maxIsrArr[0] } else { $null }
 
     $verdict = 'NORMAL'
     if ($null -ne $maxDpc) {
-        if ($maxDpc -gt 20 -or ($null -ne $maxIsr -and $maxIsr -gt 20)) { $verdict = 'CRITICAL — DPC/ISR CPU time elevated' }
-        elseif ($maxDpc -gt 5 -or ($null -ne $maxIsr -and $maxIsr -gt 5)) { $verdict = 'ELEVATED — recommend ETW escalation' }
+        if ($maxDpc -gt 20 -or ($null -ne $maxIsr -and $maxIsr -gt 20)) { $verdict = 'CRITICAL - DPC/ISR CPU time elevated' }
+        elseif ($maxDpc -gt 5 -or ($null -ne $maxIsr -and $maxIsr -gt 5)) { $verdict = 'ELEVATED - recommend ETW escalation' }
     }
 
     [PSCustomObject]@{ Timestamp=(Get-Date).ToString('o'); DurationSec=$Seconds; IntervalSec=$IntervalSeconds
         Totals=$totals; Verdict=$verdict
-        Note='DPC/ISR CPU activity screening — not per-DPC execution latency.' }
+        Note='DPC/ISR CPU activity screening - not per-DPC execution latency.' }
 }
 
 # -----------------------------------------------------------------------------
@@ -1012,7 +966,7 @@ function Start-SigEtwCapture {
 }
 
 # -----------------------------------------------------------------------------
-# SECTION 11 - Benchmark (Fixes #7, #19, #20, #23)
+# SECTION 11 - Benchmark
 # -----------------------------------------------------------------------------
 
 function Get-SigMedian {
@@ -1072,13 +1026,13 @@ function Get-SigThermalSnapshot {
 }
 
 function Wait-SigSystemIdle {
-    # Fix #7: counter failure != 0% load. Both must be KNOWN to advance.
     param([int]$RequiredIdleSeconds = 4, [int]$TimeoutSeconds = 30)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     $consecutiveIdle = 0
     $samples = 0
     $started = (Get-Date)
     $cpuBefore = $null; $diskBefore = $null
+    $anyKnown = $false
 
     while ((Get-Date) -lt $deadline -and $consecutiveIdle -lt $RequiredIdleSeconds) {
         $samples++
@@ -1087,12 +1041,12 @@ function Wait-SigSystemIdle {
         try {
             $c = Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 1 -EA Stop
             $cpu = ($c.CounterSamples | Measure-Object CookedValue -Average).Average
-            $cpuKnown = $true
+            $cpuKnown = $true; $anyKnown = $true
         } catch { $cpuKnown = $false }
         try {
             $d = Get-Counter '\PhysicalDisk(_Total)\% Disk Time' -SampleInterval 1 -MaxSamples 1 -EA Stop
             $disk = ($d.CounterSamples | Measure-Object CookedValue -Average).Average
-            $diskKnown = $true
+            $diskKnown = $true; $anyKnown = $true
         } catch { $diskKnown = $false }
 
         if ($null -eq $cpuBefore -and $cpuKnown) { $cpuBefore = $cpu }
@@ -1113,8 +1067,8 @@ function Wait-SigSystemIdle {
     $passed = ($consecutiveIdle -ge $RequiredIdleSeconds)
     $duration = ((Get-Date) - $started).TotalSeconds
 
-    if (-not $cpuKnown -and -not $diskKnown -and $samples -ge 2) {
-        Write-Host "  > idle gate unavailable — proceeding without verified idle state" -ForegroundColor Yellow
+    if (-not $anyKnown) {
+        Write-Host "  > idle gate unavailable - proceeding without verified idle state" -ForegroundColor Yellow
     } elseif ($passed) {
         Write-Host "  > BENCHMARK ENVIRONMENT READY" -ForegroundColor Green
     } else {
@@ -1126,7 +1080,7 @@ function Wait-SigSystemIdle {
         Duration = [math]::Round($duration, 1)
         CpuBeforeStart = $cpuBefore
         DiskBeforeStart = $diskBefore
-        CountersAvailable = ($cpuKnown -or $diskKnown)
+        CountersAvailable = $anyKnown
         Samples = $samples
     }
 }
@@ -1154,7 +1108,7 @@ function Measure-SigCpuConsistency {
             $results += [PSCustomObject]@{ Run=$run; Ops=$iter; OpsPerSec=[math]::Round($iter / $sw.Elapsed.TotalSeconds, 0) }
         }
     } finally {
-        if ($hash) { $hash.Dispose() }   # Fix #23
+        if ($hash) { $hash.Dispose() }
     }
     $ops = [double[]]$results.OpsPerSec
     $median = Get-SigMedian $ops
@@ -1223,7 +1177,6 @@ function Get-SigDiskSpdVersion {
 }
 
 function Measure-SigDiskSpd {
-    # Fix #19: separate PRECONDITION from MEASUREMENT (no -c on tests)
     param([string]$TargetPath = $env:TEMP)
 
     $diskspd = Get-Command diskspd.exe -EA SilentlyContinue
@@ -1236,22 +1189,24 @@ function Measure-SigDiskSpd {
     $xmlPath = [System.IO.Path]::ChangeExtension($tmp, '.xml')
 
     try {
-        # --- PRECONDITION: create 1G file and warm it ---
+        # Precondition: create 1G file
         $prepArgs = @('-c1G','-t1','-o1','-d3','-w100','-b1M','-Sh',$tmp)
         $null = Invoke-SigDiskSpdXml -Arguments $prepArgs -OutXml $xmlPath -DiskSpdPath $diskspd.Source
         Start-Sleep -Seconds 2
 
-        # --- MEASURE: no -c (uses existing file) ---
+        # Sequential read - no -c
         $seqArgs = @('-t1','-o1','-d10','-w0','-b1M','-L','-Sh',$tmp)
         $x = Invoke-SigDiskSpdXml -Arguments $seqArgs -OutXml $xmlPath -DiskSpdPath $diskspd.Source
         $seqRead = Read-SigDiskSpdXml -X $x -Mode 'Read'
         Start-Sleep -Seconds 2
 
+        # Sequential write
         $writeArgs = @('-t1','-o1','-d10','-w100','-b1M','-L','-Sh',$tmp)
         $x = Invoke-SigDiskSpdXml -Arguments $writeArgs -OutXml $xmlPath -DiskSpdPath $diskspd.Source
         $seqWrite = Read-SigDiskSpdXml -X $x -Mode 'Write'
         Start-Sleep -Seconds 2
 
+        # 4K random read QD1
         $randArgs = @('-t1','-o1','-d10','-w0','-b4K','-r','-L','-Sh',$tmp)
         $x = Invoke-SigDiskSpdXml -Arguments $randArgs -OutXml $xmlPath -DiskSpdPath $diskspd.Source
         $rand4k = Read-SigDiskSpdXml -X $x -Mode 'Read'
@@ -1281,7 +1236,7 @@ function Get-SigTestEnvironment {
     try {
         $dpc = Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3 -EA Stop
         $bg = [math]::Round(($dpc.CounterSamples | Measure-Object CookedValue -Average).Average, 2)
-    } catch { }   # $bg stays null → safe
+    } catch { }
     $uptime = ((Get-Date) - $os.LastBootUpTime).TotalMinutes
     [PSCustomObject]@{
         PowerPlan=$plan; OnAc=$isAc; BackgroundCpuPct=$bg
@@ -1309,7 +1264,7 @@ function Start-SigBenchmark {
         BenchmarkSchemaVersion = $script:BenchmarkSchemaVer
         Label = $Label
         Timestamp = (Get-Date).ToString('o')
-        IdleGate = $idle                                     # Fix #20
+        IdleGate = $idle
         Environment = $env
         Machine = (Get-SigMachineProfile)
         CPU = $cpu
@@ -1322,7 +1277,6 @@ function Start-SigBenchmark {
 }
 
 function Compare-SigBenchmarks {
-    # Fix #21: environment guards. Fix #22: split CPU/Disk validity.
     param(
         [Parameter(Mandatory)][string]$BeforeLabel,
         [Parameter(Mandatory)][string]$AfterLabel
@@ -1340,7 +1294,7 @@ function Compare-SigBenchmarks {
 
     if ($b.BenchmarkSchemaVersion -ne $a.BenchmarkSchemaVersion) {
         $cpuValid = $false; $diskValid = $false
-        $cpuInvalidReason = "Benchmark schema changed ($($b.BenchmarkSchemaVersion) → $($a.BenchmarkSchemaVersion))"
+        $cpuInvalidReason = "Benchmark schema changed ($($b.BenchmarkSchemaVersion) -> $($a.BenchmarkSchemaVersion))"
         $cpuWarnings += $cpuInvalidReason; $diskWarnings += $cpuInvalidReason
     }
     if ($b.SigmaVersion -ne $a.SigmaVersion) {
@@ -1348,7 +1302,6 @@ function Compare-SigBenchmarks {
         $cpuInvalidReason = "Sigma version changed"
         $cpuWarnings += $cpuInvalidReason; $diskWarnings += $cpuInvalidReason
     }
-    # Fix #21: environment guards
     if ($null -ne $b.Environment.OnAc -and $null -ne $a.Environment.OnAc -and $b.Environment.OnAc -ne $a.Environment.OnAc) {
         $cpuValid = $false
         $cpuInvalidReason = "AC/battery state differs (before=$($b.Environment.OnAc) after=$($a.Environment.OnAc))"
@@ -1360,10 +1313,10 @@ function Compare-SigBenchmarks {
     if ($b.Disk.Available -and $a.Disk.Available) {
         if ($b.Disk.EngineVersion -ne $a.Disk.EngineVersion) {
             $diskValid = $false
-            $diskInvalidReason = "DiskSpd version changed ($($b.Disk.EngineVersion) → $($a.Disk.EngineVersion))"
+            $diskInvalidReason = "DiskSpd version changed ($($b.Disk.EngineVersion) -> $($a.Disk.EngineVersion))"
             $diskWarnings += $diskInvalidReason
         } elseif ($b.Disk.EngineVersion -eq 'unknown' -or $a.Disk.EngineVersion -eq 'unknown') {
-            $diskWarnings += 'DiskSpd version unknown — disk comparison not considered reproducible'
+            $diskWarnings += 'DiskSpd version unknown - disk comparison not considered reproducible'
         }
     }
 
@@ -1443,7 +1396,7 @@ function Get-SigOptimizationCatalog {
             }
         },
         @{
-            Id='Telemetry_Minimum'; Category='Privacy'; Title='Diagnostic data → Required only (value 1)'
+            Id='Telemetry_Minimum'; Category='Privacy'; Title='Diagnostic data -> Required only (value 1)'
             Risk='Low'; Impact='Privacy'; RequiresReboot=$false
             AppliesTo = { param($ctx) $ctx.OS.Build -ge 10240 }
             Apply = { param($TxId)
@@ -1474,7 +1427,6 @@ function Get-SigContext {
 }
 
 function Invoke-SigOptimization {
-    # Fix #16: SigmaCriticalMutationException halts the batch immediately.
     param(
         [Parameter(Mandatory)][string[]]$Ids,
         [switch]$DryRun
@@ -1512,14 +1464,14 @@ function Invoke-SigOptimization {
             $appliedIds += $id
             Write-Sig "Applied: $($opt.Title)" -Level OK -Tag 'OPT'
         } catch [SigmaCriticalMutationException] {
-            Write-Sig "CRITICAL: $_ — halting batch." -Level ERROR -Tag 'OPT'
-            Add-SigError "Critical: $id — $_"
+            Write-Sig "CRITICAL: $_ -- halting batch." -Level ERROR -Tag 'OPT'
+            Add-SigError "Critical: $id -- $_"
             $failed++
             $recoveryRequired = $true
             break
         } catch {
-            Write-Sig "Apply failed: $($opt.Title) — $_" -Level ERROR -Tag 'OPT'
-            Add-SigError "Apply failed: $id — $_"
+            Write-Sig "Apply failed: $($opt.Title) -- $_" -Level ERROR -Tag 'OPT'
+            Add-SigError "Apply failed: $id -- $_"
             $failed++
         }
     }
@@ -1550,7 +1502,7 @@ function Invoke-SigOptimization {
 function Get-SigResults_GroupA {
     $out = New-Object System.Collections.ArrayList
 
-    # Cat 1
+    # Cat 1 - Installation
     $nt = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
     $os = Get-CimInstance Win32_OperatingSystem
     $lic = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f'" -EA SilentlyContinue | Select-Object -First 1
@@ -1562,7 +1514,7 @@ function Get-SigResults_GroupA {
         Activation=$(if ($lic) { $lic.LicenseStatus } else { $null })
     }))
 
-    # Cat 2
+    # Cat 2 - Windows Update
     $sd = "$env:WINDIR\SoftwareDistribution\Download"
     $sdMB = 0
     if (Test-Path $sd) {
@@ -1571,8 +1523,8 @@ function Get-SigResults_GroupA {
     }
     $pending = 0
     try { $ss = New-Object -ComObject Microsoft.Update.Session; $se = $ss.CreateUpdateSearcher(); $pending = $se.Search("IsInstalled=0 and IsHidden=0").Updates.Count } catch { }
-    $ev = Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-WindowsUpdateClient'} -MaxEvents 30 -EA SilentlyContinue
-    $fails = ($ev | Where-Object { $_.Id -in 20,16 }).Count
+    $ev = @(Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-WindowsUpdateClient'} -MaxEvents 30 -EA SilentlyContinue)
+    $fails = (@($ev | Where-Object { $_.Id -in 20,16 })).Count
     $findings = @()
     if ($sdMB -gt 5000) { $findings += "SoftwareDistribution cache $sdMB MB" }
     if ($pending -gt 10) { $findings += "$pending pending updates" }
@@ -1582,23 +1534,23 @@ function Get-SigResults_GroupA {
         CacheMB=$sdMB; Pending=$pending; Failures=$fails
     }))
 
-    # Cat 3
-    $allDrv = Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName }
-    $old = $allDrv | Where-Object { $_.DriverDate -and ([datetime]$_.DriverDate) -lt (Get-Date).AddYears(-3) -and $_.DeviceName -match 'Display|Network|Audio|Storage' }
-    $unsigned = $allDrv | Where-Object { -not $_.IsSigned }
+    # Cat 3 - Drivers
+    $allDrv = @(Get-CimInstance Win32_PnPSignedDriver | Where-Object { $_.DeviceName })
+    $old = @($allDrv | Where-Object { $_.DriverDate -and ([datetime]$_.DriverDate) -lt (Get-Date).AddYears(-3) -and $_.DeviceName -match 'Display|Network|Audio|Storage' })
+    $unsigned = @($allDrv | Where-Object { -not $_.IsSigned })
     $drvSeverity = 0; $drvStatus = 'OK'; $findings = @()
     if ($old.Count) { $findings += "$($old.Count) display/network/audio/storage drivers older than 3 years (informational)"; $drvStatus = 'INFO' }
     if ($unsigned.Count) { $findings += "$($unsigned.Count) unsigned drivers"; $drvStatus = 'WARN'; $drvSeverity = 4 }
     $null = $out.Add((New-Evidence -DetectorId 'DRV_AGE_001' -Category 3 -Status $drvStatus -Severity $drvSeverity -Confidence 0.9 -Subject 'Drivers' -Finding ($findings -join '; ') -EvidenceLines $findings -Data @{ Total=$allDrv.Count; Old=$old; Unsigned=$unsigned }))
 
-    # Cat 4
-    $prob = Get-PnpDevice -PresentOnly -EA SilentlyContinue | Where-Object { $_.Status -ne 'OK' -and $_.Status -ne 'Unknown' }
-    $probSeverity = 0; if ($prob) { $probSeverity = 6 }
-    $probStatus = 'OK'; if ($prob) { $probStatus = 'WARN' }
-    $probFinding = 'No problem devices'; if ($prob) { $probFinding = "$($prob.Count) problem devices" }
+    # Cat 4 - Device Manager
+    $prob = @(Get-PnpDevice -PresentOnly -EA SilentlyContinue | Where-Object { $_.Status -ne 'OK' -and $_.Status -ne 'Unknown' })
+    $probSeverity = 0; if ($prob.Count) { $probSeverity = 6 }
+    $probStatus = 'OK'; if ($prob.Count) { $probStatus = 'WARN' }
+    $probFinding = 'No problem devices'; if ($prob.Count) { $probFinding = "$($prob.Count) problem devices" }
     $null = $out.Add((New-Evidence -DetectorId 'DEVMGR_PROBLEM_001' -Category 4 -Status $probStatus -Severity $probSeverity -Confidence 0.98 -Subject 'Device Manager' -Finding $probFinding -EvidenceLines @($prob | ForEach-Object { "$($_.FriendlyName): $($_.ProblemDescription)" }) -Data @{ Problems=$prob }))
 
-    # Cat 5
+    # Cat 5 - Firmware
     $efiInfo = Test-SigEfiSystemPresent
     $sb = $null; try { $sb = Confirm-SecureBootUEFI -EA Stop } catch { }
     $tpm = $null; try { $tpm = Get-Tpm -EA Stop } catch { }
@@ -1618,7 +1570,7 @@ function Get-SigResults_GroupA {
 function Get-SigResults_GroupB {
     $out = New-Object System.Collections.ArrayList
 
-    # Cat 6 (WinRE model v0.8)
+    # Cat 6 - Boot
     $winreState = Get-SigWinReState
     $efiInfo = Test-SigEfiSystemPresent
     $fastStart = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name 'HiberbootEnabled' -EA SilentlyContinue).HiberbootEnabled
@@ -1641,15 +1593,13 @@ function Get-SigResults_GroupB {
         IsUefi=$efiInfo.IsUefi; HasEfi=$efiInfo.HasEfi; FastStartup=$fastStart
     }))
 
-    # Cat 7 (Fix #11, #12)
-    $dumps = Get-ChildItem "$env:SystemRoot\Minidump" -Filter '*.dmp' -EA SilentlyContinue | Where-Object { $_.LastWriteTime -ge (Get-Date).AddDays(-30) }
+    # Cat 7 - Stability
+    $dumps = @(Get-ChildItem "$env:SystemRoot\Minidump" -Filter '*.dmp' -EA SilentlyContinue | Where-Object { $_.LastWriteTime -ge (Get-Date).AddDays(-30) })
     $wheaEvents = @(Get-WinEvent -FilterHashtable @{LogName='System';ProviderName='Microsoft-Windows-WHEA-Logger';StartTime=(Get-Date).AddDays(-30)} -EA SilentlyContinue)
-    $kp41 = Get-WinEvent -FilterHashtable @{LogName='System';Id=41;StartTime=(Get-Date).AddDays(-30)} -EA SilentlyContinue
+    $kp41 = @(Get-WinEvent -FilterHashtable @{LogName='System';Id=41;StartTime=(Get-Date).AddDays(-30)} -EA SilentlyContinue)
 
-    # Heuristic classification (language-dependent)
     $wheaFatal = @($wheaEvents | Where-Object { $_.Message -match 'fatal|unrecoverable|uncorrected|Machine Check|MCE' })
     $wheaCorrected = @($wheaEvents | Where-Object { $_.Message -match 'corrected' -or $_.Id -in 17,18,19,20 })
-    # Fix #12: unclassified bucket
     $wheaOther = @($wheaEvents | Where-Object { $_ -notin $wheaFatal -and $_ -notin $wheaCorrected })
 
     $findings = @()
@@ -1664,7 +1614,7 @@ function Get-SigResults_GroupB {
     elseif ($dumps.Count)      { $stabStatus='FAIL'; $stabSeverity=7 }
     elseif ($kp41.Count -ge 3) { $stabStatus='WARN'; $stabSeverity=5 }
     elseif ($wheaCorrected.Count) { $stabStatus='WARN'; $stabSeverity=4 }
-    elseif ($wheaOther.Count)  { $stabStatus='WARN'; $stabSeverity=4 }   # Fix #12
+    elseif ($wheaOther.Count)  { $stabStatus='WARN'; $stabSeverity=4 }
     elseif ($kp41.Count -eq 1) { $stabStatus='INFO'; $stabSeverity=2 }
 
     $null = $out.Add((New-Evidence -DetectorId 'STAB_BSOD_001' -Category 7 -Status $stabStatus -Severity $stabSeverity -Confidence 0.85 -Subject 'BSOD' -Finding ($findings -join '; ') -EvidenceLines $findings -Data @{
@@ -1677,12 +1627,12 @@ function Get-SigResults_GroupB {
         KernelPower41=$kp41 | Select-Object -First 10 TimeCreated
     }))
 
-    # Cat 8
-    $top = Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 15 Name,Id,@{n='RAM_MB';e={[math]::Round($_.WorkingSet64/1MB,1)}},@{n='CPU_s';e={[math]::Round($_.CPU,1)}}
-    $startup = Get-CimInstance Win32_StartupCommand -EA SilentlyContinue
+    # Cat 8 - Performance
+    $top = @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 15 Name,Id,@{n='RAM_MB';e={[math]::Round($_.WorkingSet64/1MB,1)}},@{n='CPU_s';e={[math]::Round($_.CPU,1)}})
+    $startup = @(Get-CimInstance Win32_StartupCommand -EA SilentlyContinue)
     $null = $out.Add((New-Evidence -DetectorId 'PERF_TOP_001' -Category 8 -Status 'INFO' -Severity 0 -Confidence 1.0 -Subject 'Processes' -Finding "$($top.Count) top processes" -Data @{ Top=$top; StartupCount=$startup.Count }))
 
-    # Cat 9
+    # Cat 9 - CPU
     $cpu = Get-CimInstance Win32_Processor
     $plan = (powercfg /getactivescheme) -join ''
     $null = $out.Add((New-Evidence -DetectorId 'CPU_STATE_001' -Category 9 -Status 'INFO' -Severity 0 -Confidence 1.0 -Subject 'CPU' -Finding "$($cpu.Name)" -Data @{ Cores=$cpu.NumberOfCores; Threads=$cpu.NumberOfLogicalProcessors; ActivePlan=$plan }))
@@ -1702,7 +1652,7 @@ function New-SigHtmlReport {
     Add-Type -AssemblyName System.Web -EA SilentlyContinue
     $ok=0; $warn=0; $fail=0
     foreach ($e in $Evidence) { switch ($e.Status) { 'OK'{$ok++} 'WARN'{$warn++} 'FAIL'{$fail++} } }
-    $rows = foreach ($e in $Evidence) {
+    $rows = @(foreach ($e in $Evidence) {
         $color = '#888'
         switch ($e.Status) { 'OK'{$color='#6bff8f'} 'WARN'{$color='#ffd93b'} 'FAIL'{$color='#ff6b6b'} }
         $finding = [System.Web.HttpUtility]::HtmlEncode($e.Finding)
@@ -1712,10 +1662,10 @@ function New-SigHtmlReport {
             $data = "<details><summary>data</summary><pre>$json</pre></details>"
         }
         "<tr style='border-left:4px solid $color'><td>$($e.Category)</td><td>$($e.DetectorId)</td><td>$($e.Status)</td><td>$([math]::Round($e.Confidence,2))</td><td>$finding</td><td>$data</td></tr>"
-    }
-    $corrRows = foreach ($c in $Correlations) {
+    })
+    $corrRows = @(foreach ($c in $Correlations) {
         "<tr><td>$($c.CorrelationScore)</td><td>$($c.SuspectName)</td><td>$($c.SymptomName)</td><td>$($c.DeltaSec)s</td><td>$($c.Reasoning)</td></tr>"
-    }
+    })
     $html = @"
 <!DOCTYPE html><html><head><meta charset='utf-8'><title>Sigma Report</title>
 <style>
@@ -1733,7 +1683,7 @@ th{background:#1f2330} pre{background:#0a0c10;padding:.5em;overflow:auto;max-hei
 <h2>DPC / ISR Screening</h2>
 <pre>$([System.Web.HttpUtility]::HtmlEncode(($Dpc | ConvertTo-Json -Depth 4)))</pre>
 <h2>Correlations (heuristic CorrelationScore)</h2>
-<table><thead><tr><th>Score</th><th>Suspect</th><th>Symptom</th><th>Δt</th><th>Reasoning</th></tr></thead>
+<table><thead><tr><th>Score</th><th>Suspect</th><th>Symptom</th><th>dt</th><th>Reasoning</th></tr></thead>
 <tbody>$($corrRows -join "`n")</tbody></table>
 <h2>Detections</h2>
 <table><thead><tr><th>#</th><th>Detector</th><th>Status</th><th>Conf</th><th>Finding</th><th>Data</th></tr></thead>
@@ -1750,8 +1700,8 @@ th{background:#1f2330} pre{background:#0a0c10;padding:.5em;overflow:auto;max-hei
 # -----------------------------------------------------------------------------
 
 try {
-    # --- Pending validation
-    $pendingIds = Get-SigPendingTxIds
+    # Pending validation check
+    $pendingIds = @(Get-SigPendingTxIds)
     $unresolvedPending = @()
 
     if ($pendingIds.Count -gt 0) {
@@ -1766,7 +1716,7 @@ try {
             $meta = Get-Content $metaFile -Raw | ConvertFrom-Json
 
             if ($meta.RecoveryRequired) {
-                Write-Host "  $pendingId is in RecoveryRequired — manual review needed." -ForegroundColor Red
+                Write-Host "  $pendingId is in RecoveryRequired -- manual review needed." -ForegroundColor Red
                 $unresolvedPending += $pendingId
                 continue
             }
@@ -1786,8 +1736,8 @@ try {
             $null = Start-SigBenchmark -Label $afterLabel
             $cmp = Compare-SigBenchmarks -BeforeLabel $pending.BaselineLabel -AfterLabel $afterLabel
 
-            Write-Host "  Δ median: $($cmp.CPU_Delta) ops/s ($($cmp.CPU_DeltaPct)%)" -ForegroundColor DarkGray
-            Write-Host "  95% CI:   $($cmp.CPU_CI_Low) → $($cmp.CPU_CI_High)" -ForegroundColor DarkGray
+            Write-Host "  delta median: $($cmp.CPU_Delta) ops/s ($($cmp.CPU_DeltaPct)%)" -ForegroundColor DarkGray
+            Write-Host "  95% CI:       $($cmp.CPU_CI_Low) -> $($cmp.CPU_CI_High)" -ForegroundColor DarkGray
 
             if (-not $cmp.CPUComparisonValid) {
                 Write-Host "  RESULT: CPU COMPARISON INVALID ($($cmp.CPUInvalidReason))" -ForegroundColor Red
@@ -1821,7 +1771,7 @@ try {
         if ($continue -notin 'Y','y') { Release-SigMutex; Write-Host "Exiting." -ForegroundColor Cyan; exit 0 }
     }
 
-    # --- Normal flow
+    # DISCOVER
     Write-Host ""
     Write-Host "========== DISCOVER ==========" -ForegroundColor Green
     $hw = Get-SigHardwareInventory
@@ -1830,6 +1780,7 @@ try {
     Write-Host "  CPU:     $($hw.Profile.CPUName)  (LikelyHybrid: $($hw.Profile.LikelyHybrid))" -ForegroundColor DarkGray
     Write-Host "  RAM:     $($hw.Profile.TotalRAMGB) GB" -ForegroundColor DarkGray
 
+    # DETECT
     Write-Host ""
     Write-Host "========== DETECT ==========" -ForegroundColor Green
     $evidence = New-Object System.Collections.ArrayList
@@ -1845,6 +1796,7 @@ try {
         }
     }
 
+    # MEASURE
     Write-Host ""
     Write-Host "========== MEASURE ==========" -ForegroundColor Green
     Write-Host "  > DPC/ISR screening (15s)..." -NoNewline
@@ -1859,15 +1811,17 @@ try {
         }
     }
 
+    # CORRELATE
     Write-Host ""
     Write-Host "========== CORRELATE ==========" -ForegroundColor Green
-    $events = Get-SigEventStream -HoursBack 72
-    $correlations = Get-SigCorrelations -Events $events -WindowSeconds 30
+    $events = @(Get-SigEventStream -HoursBack 72)
+    $correlations = @(Get-SigCorrelations -Events $events -WindowSeconds 30)
     Write-Host "  Events: $($events.Count), correlations: $($correlations.Count)" -ForegroundColor DarkGray
     foreach ($c in ($correlations | Select-Object -First 5)) {
-        Write-Host ("  [{0}] {1} → {2}  ({3}s before)" -f $c.CorrelationScore, $c.SuspectName, $c.SymptomName, $c.DeltaSec) -ForegroundColor Cyan
+        Write-Host ("  [{0}] {1} -> {2}  ({3}s before)" -f $c.CorrelationScore, $c.SuspectName, $c.SymptomName, $c.DeltaSec) -ForegroundColor Cyan
     }
 
+    # BASELINE
     Write-Host ""
     Write-Host "========== BASELINE BENCHMARK ==========" -ForegroundColor Green
     $baselineLabel = "baseline_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss')
@@ -1875,10 +1829,11 @@ try {
     Write-Host "  CPU median: $($baseline.CPU.MedianOpsPerSec) ops/s  (CV $($baseline.CPU.CV_Percent)%)" -ForegroundColor DarkGray
     Write-Host "  Idle gate: passed=$($baseline.IdleGate.Passed) counters=$($baseline.IdleGate.CountersAvailable)" -ForegroundColor DarkGray
 
+    # OPTIMIZE
     Write-Host ""
     Write-Host "========== OPTIMIZE ==========" -ForegroundColor Green
     $catalog = Get-SigOptimizationCatalog
-    $applicable = $catalog | Where-Object { & $_.AppliesTo $ctx }
+    $applicable = @($catalog | Where-Object { & $_.AppliesTo $ctx })
     for ($i = 0; $i -lt $applicable.Count; $i++) {
         $rebootFlag = ''
         if ($applicable[$i].RequiresReboot) { $rebootFlag = ' [reboot]' }
@@ -1907,6 +1862,7 @@ try {
         $txRecoveryRequired = $optResult.RecoveryRequired
     }
 
+    # VALIDATE
     Write-Host ""
     Write-Host "========== VALIDATE ==========" -ForegroundColor Green
     if ($txRecoveryRequired) {
@@ -1924,7 +1880,7 @@ try {
             $afterLabel = "after_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss')
             $null = Start-SigBenchmark -Label $afterLabel
             $cmp = Compare-SigBenchmarks -BeforeLabel $baselineLabel -AfterLabel $afterLabel
-            Write-Host "  Δ median: $($cmp.CPU_Delta) ops/s ($($cmp.CPU_DeltaPct)%)" -ForegroundColor DarkGray
+            Write-Host "  delta median: $($cmp.CPU_Delta) ops/s ($($cmp.CPU_DeltaPct)%)" -ForegroundColor DarkGray
             if (-not $cmp.CPUComparisonValid) {
                 Write-Host "  RESULT: CPU COMPARISON INVALID ($($cmp.CPUInvalidReason))" -ForegroundColor Red
                 Set-SigTxState -TxId $txId -State 'ValidatedInconclusive'
@@ -1951,6 +1907,7 @@ try {
         Write-Host "  No optimizations applied." -ForegroundColor DarkGray
     }
 
+    # REPORT
     Write-Host ""
     Write-Host "========== REPORT ==========" -ForegroundColor Green
     $reportPath = New-SigHtmlReport -Evidence $evidence.ToArray() -Hardware $hw -Dpc $dpc -Correlations $correlations
