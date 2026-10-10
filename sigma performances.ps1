@@ -7,7 +7,7 @@
 #   1. Device Cleanup   (Unknown + Ghost devices)
 #   2. Telemetry Removal
 #   3. PowerCfg Registry
-#   4. CPU Optimization (AC / DC)   [+ PCIe Link State Power Mgmt AC = Off]
+#   4. CPU Optimization (AC / DC)   [+ PCIe Link State Power Mgmt AC+DC = Off]
 #   5. Network Throttle (QoS 1-3000 Mbps)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
@@ -54,7 +54,7 @@ Write-Host "[WARNING] This will apply ALL of the following, in order:" -Foregrou
 Write-Host "   1. Device Cleanup (Unknown + Ghost devices)" -ForegroundColor Yellow
 Write-Host "   2. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   3. PowerCfg Registry values" -ForegroundColor Yellow
-Write-Host "   4. CPU Optimization (AC / DC) + PCIe Link State (AC Off)" -ForegroundColor Yellow
+Write-Host "   4. CPU Optimization (AC / DC) + PCIe Link State (AC+DC Off)" -ForegroundColor Yellow
 Write-Host "   5. Network Throttle (QoS)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
@@ -302,13 +302,32 @@ Write-OverallProgress -Status "CPU Optimization" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_optimization_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
-# Save current active power scheme GUID (preserved)
-$originalScheme = (powercfg -getactivescheme) -replace '.*\s([A-F0-9\-]{36}).*', '$1'
-
-# --- 4a. Activate Ultimate Performance power scheme ---
+# --- 4a. Activate Ultimate Performance power scheme (fixed) ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Activating Ultimate Performance scheme..." -PercentComplete 3
-powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
-powercfg -setactive       e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
+
+$dupOutput = (powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog) | Out-String
+$ultimateGuid = $null
+if ($dupOutput -match '([A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12})') {
+    $ultimateGuid = $matches[1]
+}
+
+if ($ultimateGuid) {
+    powercfg -setactive $ultimateGuid 2>> $errorLog
+} else {
+    # Fallback: try the original GUID (may exist hidden on some systems)
+    powercfg -setactive e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
+}
+
+# Resolve the truly active scheme GUID (this is what we will write into)
+$activeGuid = $null
+$activeOut  = (powercfg -getactivescheme 2>> $errorLog) | Out-String
+if ($activeOut -match '([A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12})') {
+    $activeGuid = $matches[1]
+}
+if (-not $activeGuid) {
+    # Absolute fallback
+    $activeGuid = 'SCHEME_CURRENT'
+}
 
 # --- 4b. CPU / Processor settings ---
 $cpuSettings = @{
@@ -370,24 +389,28 @@ $cpuIndex = 0
 
 foreach ($key in $cpuKeys) {
     $cpuIndex++
-    $pct = 5 + [math]::Round($cpuIndex / $cpuTotal * 90)
+    $pct = 5 + [math]::Round($cpuIndex / $cpuTotal * 88)
     Write-SubProgress -Activity "CPU Optimization" -Status "Applying: $key ($cpuIndex/$cpuTotal)" -PercentComplete $pct
-    powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
-    powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
+    powercfg /setacvalueindex $activeGuid SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
+    powercfg /setdcvalueindex $activeGuid SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
 }
 
-# --- 4c. PCI Express Link State Power Management (Plugged in / AC = Off) ---
-Write-SubProgress -Activity "CPU Optimization" -Status "Setting PCIe Link State Power Mgmt (AC) to Off..." -PercentComplete 96
-powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ee12f906-d277-404b-b6da-e5fa1a576df5 0 2>> $errorLog
+# --- 4c. PCI Express Link State Power Management (AC + DC = Off) ---
+Write-SubProgress -Activity "CPU Optimization" -Status "Setting PCIe Link State Power Mgmt AC+DC to Off..." -PercentComplete 94
+# Subgroup SUB_PCIEXPRESS = 501a4d13-42af-4429-9fd1-a8218c268e20
+# Setting  ee12f906-d277-404b-b6da-e5fa1a576df5 = Link State Power Management
+# Value 0 = Off
+powercfg /setacvalueindex $activeGuid SUB_PCIEXPRESS ee12f906-d277-404b-b6da-e5fa1a576df5 0 2>> $errorLog
+powercfg /setdcvalueindex $activeGuid SUB_PCIEXPRESS ee12f906-d277-404b-b6da-e5fa1a576df5 0 2>> $errorLog
 
 # --- 4d. Extra processor GUID ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Applying extra processor GUID..." -PercentComplete 98
-powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
-powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
+powercfg /setacvalueindex $activeGuid SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
+powercfg /setdcvalueindex $activeGuid SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
 
-# --- 4e. Final commit ---
+# --- 4e. Final commit (re-activate scheme so changes take effect) ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Committing power scheme..." -PercentComplete 99
-powercfg -setactive SCHEME_CURRENT 2>> $errorLog
+powercfg -setactive $activeGuid 2>> $errorLog
 
 # Error report
 if (Test-Path $errorLog) {
