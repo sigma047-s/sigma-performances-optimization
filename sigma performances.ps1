@@ -378,7 +378,7 @@ foreach ($key in $cpuKeys) {
 
 # --- 4c. PCI Express Link State Power Management (Plugged in / AC = Off) ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Setting PCIe Link State Power Mgmt (AC) to Off..." -PercentComplete 96
-powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS 501a4d13-42af-4429-9fd1-a8218c268e20 0 2>> $errorLog
+powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS ee12f906-d277-404b-b6da-e5fa1a576df5 0 2>> $errorLog
 
 # --- 4d. Extra processor GUID ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Applying extra processor GUID..." -PercentComplete 98
