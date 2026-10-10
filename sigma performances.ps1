@@ -8,7 +8,7 @@
 #   2. Telemetry Removal
 #   3. PowerCfg Registry
 #   4. CPU Optimization (AC / DC)
-#   5. GPU Optimization (PCI Express = Off)
+#   5. Network Throttle (QoS 1-3000 Mbps)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
 # =============================================================================
@@ -55,7 +55,7 @@ Write-Host "   1. Device Cleanup (Unknown + Ghost devices)" -ForegroundColor Yel
 Write-Host "   2. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   3. PowerCfg Registry values" -ForegroundColor Yellow
 Write-Host "   4. CPU Optimization (AC / DC)" -ForegroundColor Yellow
-Write-Host "   5. GPU Optimization (PCI Express = Off)" -ForegroundColor Yellow
+Write-Host "   5. Network Throttle (QoS)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
 Write-Host ""
@@ -400,39 +400,133 @@ Write-OverallProgress -Status "CPU Optimization complete" -SubPercent 100
 Write-Host "  [4/5] CPU Optimization .......................... DONE" -ForegroundColor Green
 
 # =============================================================================
-# STEP 5 - GPU OPTIMIZATION (PCI EXPRESS = OFF)
-# -----------------------------------------------------------------------------
-# Only modifies: PCI Express -> Link State Power Management = Off
-#   Subgroup: 501a4d13-42af-4429-9fd1-a8218c268e20  (SUB_PCIEXPRESS)
-#   Setting:  ee12f906-d277-404b-b6da-e5fa1a576df5  (ASPM)
-#   Value:    0 = Off
-# Applied to both AC (plugged in) and DC (battery).
+# STEP 5 - NETWORK THROTTLE (QoS) - menu preserved from original
 # =============================================================================
 $script:CurrentStep = 5
-Write-OverallProgress -Status "GPU Optimization" -SubPercent 0
+Write-OverallProgress -Status "Network Throttle" -SubPercent 0
 
-$errorLog = "$env:TEMP\sigma_gpu_optimization_errors.log"
+$PolicyPrefix = "LimitPCto"
+$MinMbps      = 1
+$MaxMbps      = 3000
+
+$errorLog = "$env:TEMP\sigma_netqos_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
-$pcieSubgroup = "501a4d13-42af-4429-9fd1-a8218c268e20"
-$aspmSetting  = "ee12f906-d277-404b-b6da-e5fa1a576df5"
-$offValue     = 0
+function Set-QosLimit {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateRange(1, 3000)]
+        [int]$Mbps
+    )
+    $bits       = [uint64]$Mbps * 1000000
+    $policyName = "$PolicyPrefix$Mbps"
 
-# --- 5a. Force Ultimate Performance scheme as base (so the change sticks) ---
-Write-SubProgress -Activity "GPU Optimization" -Status "Ensuring active power scheme..." -PercentComplete 20
-powercfg -setactive SCHEME_CURRENT 2>> $errorLog
+    Get-NetQosPolicy -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$PolicyPrefix*" } |
+        ForEach-Object {
+            Remove-NetQosPolicy -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue 2>> $errorLog
+        }
 
-# --- 5b. Set PCI Express ASPM = Off on AC ---
-Write-SubProgress -Activity "GPU Optimization" -Status "Setting PCI Express (AC) = Off..." -PercentComplete 55
-powercfg /setacvalueindex SCHEME_CURRENT $pcieSubgroup $aspmSetting $offValue 2>> $errorLog
+    New-NetQosPolicy -Name $policyName `
+        -ThrottleRateActionBitsPerSecond $bits `
+        -ErrorAction SilentlyContinue 2>> $errorLog
+}
 
-# --- 5c. Set PCI Express ASPM = Off on DC ---
-Write-SubProgress -Activity "GPU Optimization" -Status "Setting PCI Express (DC) = Off..." -PercentComplete 80
-powercfg /setdcvalueindex SCHEME_CURRENT $pcieSubgroup $aspmSetting $offValue 2>> $errorLog
+function Remove-AllLimits {
+    $policies = Get-NetQosPolicy -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$PolicyPrefix*" }
 
-# --- 5d. Commit ---
-Write-SubProgress -Activity "GPU Optimization" -Status "Committing power scheme..." -PercentComplete 95
-powercfg -setactive SCHEME_CURRENT 2>> $errorLog
+    if (-not $policies) {
+        Write-Host "[INFO] No '$PolicyPrefix*' QoS policy is applied." -ForegroundColor DarkGray
+        return
+    }
+
+    foreach ($p in $policies) {
+        Remove-NetQosPolicy -Name $p.Name -Confirm:$false -ErrorAction SilentlyContinue 2>> $errorLog
+        Write-Host "[REMOVED] $($p.Name)" -ForegroundColor Green
+    }
+}
+
+function Show-AllLimits {
+    $policies = Get-NetQosPolicy -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "$PolicyPrefix*" }
+
+    if (-not $policies) {
+        Write-Host "[INFO] No '$PolicyPrefix*' QoS policy is applied." -ForegroundColor DarkGray
+        return
+    }
+
+    foreach ($p in $policies) {
+        $bits = $null
+        if ($p.PSObject.Properties.Name -contains 'ThrottleRateActionBitsPerSecond') {
+            $bits = [uint64]$p.ThrottleRateActionBitsPerSecond
+        }
+        elseif ($p.PSObject.Properties.Name -contains 'ThrottleRateAction') {
+            $bits = [uint64]$p.ThrottleRateAction
+        }
+
+        if ($bits -gt 0) {
+            $mbps = [math]::Round($bits / 1000000, 3)
+            Write-Host "[ACTIVE] $($p.Name)  ->  $mbps Mbps ($bits bits/s)" -ForegroundColor Cyan
+        } else {
+            Write-Host "[ACTIVE] $($p.Name)  ->  unknown" -ForegroundColor Cyan
+        }
+    }
+}
+
+function Show-Menu {
+    Write-Host ""
+    Write-Host "1. Apply throttle ($MinMbps-$MaxMbps Mbps)" -ForegroundColor White
+    Write-Host "2. Remove all throttles" -ForegroundColor White
+    Write-Host "3. Show applied throttles" -ForegroundColor White
+    Write-Host "4. Quit" -ForegroundColor White
+    Write-Host ""
+}
+
+do {
+    Show-Menu
+    $choice = Read-Host "Choose an option (1-4)"
+
+    switch ($choice) {
+        "1" {
+            $inputMbps = Read-Host "Enter Mbps ($MinMbps-$MaxMbps)"
+            if ($inputMbps -match '^\d+$') {
+                $mbpsInt = [int]$inputMbps
+                if ($mbpsInt -ge $MinMbps -and $mbpsInt -le $MaxMbps) {
+                    Write-SubProgress -Activity "Network Throttle" -Status "Applying throttle: $mbpsInt Mbps..." -PercentComplete 50
+                    Set-QosLimit -Mbps $mbpsInt
+                    Write-SubProgress -Activity "Network Throttle" -Status "Throttle applied." -PercentComplete 100
+                }
+                else {
+                    Write-Host "[ERROR] Value must be between $MinMbps and $MaxMbps." -ForegroundColor Red
+                }
+            }
+            else {
+                Write-Host "[ERROR] Enter a whole number." -ForegroundColor Red
+            }
+        }
+
+        "2" {
+            Write-SubProgress -Activity "Network Throttle" -Status "Removing all '$PolicyPrefix*' policies..." -PercentComplete 50
+            Remove-AllLimits
+            Write-SubProgress -Activity "Network Throttle" -Status "Throttles removed." -PercentComplete 100
+        }
+
+        "3" {
+            Write-Host ""
+            Write-Host "[INFO] Currently applied throttles:" -ForegroundColor Cyan
+            Show-AllLimits
+        }
+
+        "4" {
+            Write-SubProgress -Activity "Network Throttle" -Status "No change selected." -PercentComplete 100
+        }
+
+        default {
+            Write-Host "[ERROR] Invalid choice." -ForegroundColor Red
+        }
+    }
+} until ($choice -eq "4")
 
 # Error report
 if (Test-Path $errorLog) {
@@ -444,9 +538,9 @@ if (Test-Path $errorLog) {
     }
 }
 
-Complete-SubProgress -Activity "GPU Optimization"
-Write-OverallProgress -Status "GPU Optimization complete" -SubPercent 100
-Write-Host "  [5/5] GPU Optimization (PCI Express Off) ........ DONE" -ForegroundColor Green
+Complete-SubProgress -Activity "Network Throttle"
+Write-OverallProgress -Status "Network Throttle complete" -SubPercent 100
+Write-Host "  [5/5] Network Throttle .......................... DONE" -ForegroundColor Green
 
 # =============================================================================
 # FINAL SUMMARY
@@ -459,7 +553,7 @@ Write-Host "   [1/5] Device Cleanup ............................ OK" -Foreground
 Write-Host "   [2/5] Telemetry & Tracking Removal .............. OK" -ForegroundColor Green
 Write-Host "   [3/5] PowerCfg Registry ......................... OK" -ForegroundColor Green
 Write-Host "   [4/5] CPU Optimization .......................... OK" -ForegroundColor Green
-Write-Host "   [5/5] GPU Optimization (PCI Express Off) ........ OK" -ForegroundColor Green
+Write-Host "   [5/5] Network Throttle .......................... OK" -ForegroundColor Green
 Write-Host ""
 Write-Host "[SUCCESS] All optimizations applied." -ForegroundColor Green
 Write-Host "[INFO] System reboot required." -ForegroundColor Yellow
