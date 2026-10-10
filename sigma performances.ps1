@@ -7,7 +7,7 @@
 #   1. Device Cleanup   (Unknown + Ghost devices)
 #   2. Telemetry Removal
 #   3. PowerCfg Registry
-#   4. CPU Optimization (AC / DC)
+#   4. CPU Optimization (AC / DC)   [+ PCIe Link State Power Mgmt AC = Off]
 #   5. Network Throttle (QoS 1-3000 Mbps)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
@@ -54,7 +54,7 @@ Write-Host "[WARNING] This will apply ALL of the following, in order:" -Foregrou
 Write-Host "   1. Device Cleanup (Unknown + Ghost devices)" -ForegroundColor Yellow
 Write-Host "   2. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   3. PowerCfg Registry values" -ForegroundColor Yellow
-Write-Host "   4. CPU Optimization (AC / DC)" -ForegroundColor Yellow
+Write-Host "   4. CPU Optimization (AC / DC) + PCIe Link State (AC Off)" -ForegroundColor Yellow
 Write-Host "   5. Network Throttle (QoS)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
@@ -370,18 +370,22 @@ $cpuIndex = 0
 
 foreach ($key in $cpuKeys) {
     $cpuIndex++
-    $pct = 5 + [math]::Round($cpuIndex / $cpuTotal * 93)
+    $pct = 5 + [math]::Round($cpuIndex / $cpuTotal * 90)
     Write-SubProgress -Activity "CPU Optimization" -Status "Applying: $key ($cpuIndex/$cpuTotal)" -PercentComplete $pct
     powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
     powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
 }
 
-# --- 4c. Extra processor GUID ---
+# --- 4c. PCI Express Link State Power Management (Plugged in / AC = Off) ---
+Write-SubProgress -Activity "CPU Optimization" -Status "Setting PCIe Link State Power Mgmt (AC) to Off..." -PercentComplete 96
+powercfg /setacvalueindex SCHEME_CURRENT SUB_PCIEXPRESS 501a4d13-42af-4429-9fd1-a8218c268e20 0 2>> $errorLog
+
+# --- 4d. Extra processor GUID ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Applying extra processor GUID..." -PercentComplete 98
 powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
 powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
 
-# --- 4d. Final commit ---
+# --- 4e. Final commit ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Committing power scheme..." -PercentComplete 99
 powercfg -setactive SCHEME_CURRENT 2>> $errorLog
 
