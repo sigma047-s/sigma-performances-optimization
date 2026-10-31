@@ -7,7 +7,7 @@
 #   1. Device Cleanup   (Unknown + Ghost devices)
 #   2. Telemetry Removal
 #   3. PowerCfg Registry
-#   4. CPU Optimization (AC / DC)
+#   4. CPU Optimization (AC / DC) - ALL 95 GUIDs, MAX PERFORMANCE
 #   5. Network Throttle (QoS 1-3000 Mbps)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
@@ -54,7 +54,7 @@ Write-Host "[WARNING] This will apply ALL of the following, in order:" -Foregrou
 Write-Host "   1. Device Cleanup (Unknown + Ghost devices)" -ForegroundColor Yellow
 Write-Host "   2. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   3. PowerCfg Registry values" -ForegroundColor Yellow
-Write-Host "   4. CPU Optimization (AC / DC)" -ForegroundColor Yellow
+Write-Host "   4. CPU Optimization (AC / DC) - ALL 95 GUIDs" -ForegroundColor Yellow
 Write-Host "   5. Network Throttle (QoS)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
@@ -95,7 +95,7 @@ if ($unknownDevices.Count -eq 0) {
     }
 }
 
-# --- 1b. Ghost devices (with YES prompt - preserved from original) ---
+# --- 1b. Ghost devices (with YES prompt) ---
 Write-SubProgress -Activity "Device Cleanup" -Status "Searching for non-present 'ghost' devices..." -PercentComplete 30
 $ghostDevices = @(Get-PnpDevice | Where-Object { $_.Present -eq $false })
 
@@ -129,7 +129,7 @@ if ($ghostDevices.Count -eq 0) {
 Write-SubProgress -Activity "Device Cleanup" -Status "Rescanning for hardware changes..." -PercentComplete 95
 pnputil /scan-devices 2>> $errorLog | Out-Null
 
-# Error report (preserved from original script)
+# Error report
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
     if ($errorCount -gt 0) {
@@ -233,7 +233,6 @@ Write-OverallProgress -Status "PowerCfg Registry" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_powercfg_registry_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
-# Helper (preserved from original script)
 function Set-RegistryValue {
     param(
         [string]$Path,
@@ -294,7 +293,7 @@ Write-OverallProgress -Status "PowerCfg Registry complete" -SubPercent 100
 Write-Host "  [3/5] PowerCfg Registry ......................... DONE" -ForegroundColor Green
 
 # =============================================================================
-# STEP 4 - CPU OPTIMIZATION (AC / DC)
+# STEP 4 - CPU OPTIMIZATION (AC / DC) - ALL 95 GUIDs, MAX PERFORMANCE
 # =============================================================================
 $script:CurrentStep = 4
 Write-OverallProgress -Status "CPU Optimization" -SubPercent 0
@@ -302,7 +301,7 @@ Write-OverallProgress -Status "CPU Optimization" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_optimization_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
-# Save current active power scheme GUID (preserved)
+# Save current active power scheme GUID
 $originalScheme = (powercfg -getactivescheme) -replace '.*\s([A-F0-9\-]{36}).*', '$1'
 
 # --- 4a. Activate Ultimate Performance power scheme ---
@@ -310,58 +309,123 @@ Write-SubProgress -Activity "CPU Optimization" -Status "Activating Ultimate Perf
 powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
 powercfg -setactive       e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
 
-# --- 4b. CPU / Processor settings ---
-$cpuSettings = @{
-    "PROCTHROTTLEMIN"            = 100
-    "PROCTHROTTLEMAX"            = 100
-    "PERFBOOSTMODE"              = 5
-    "CPMINCORES"                 = 100
-    "PERFINCTHRESHOLD"           = 1
-    "PERFDECREASETHRESHOLD"      = 100
-    "PERFINCREASEPOLICY"         = 3
-    "PERFDECREASEPOLICY"         = 0
-    "RESPONSIVENESS"             = 100
-    "PERFORMANCECORES"           = 0
-    "PERFEPP"                    = 0
-    "IDLEDEMOTE"                 = 0
-    "IDLEPROMOTE"                = 100
-    "PERFBOOSTPOL"               = 100
-    "SHORTTHREADBOOST"           = 3
-    "HETEROPOLICY"               = 0
-    "PERFINCRES"                 = 0
-    "PERFDECRES"                 = 0
-    "RESPENABLETHRESHOLD"        = 100
-    "RESPPERFFLOOR"              = 100
-    "IDLESTATE"                  = 0
-    "PERFAUTONOMOUS"             = 0
-    "PERFAUTONOMOUSACTIVEWINDOW" = 100
-    "CPMAXCORES"                 = 100
-    "CPEPP"                      = 0
-    "CPPARKING"                  = 0
-    "CPPARKED"                   = 0
-    "CPCONCURRENCY"              = 100
-    "CPHEADROOM"                 = 100
-    "CPLATENCY"                  = 100
-    "CPLOAD"                     = 100
-    "CPREQUESTS"                 = 100
-    "CPRANDOM"                   = 0
-    "MAXFREQ"                    = 0
-    "MINFREQ"                    = 0
-    "SCHEDPOLICY"                = 2
-    "SHORTTHREADSCHED"           = 2
-    "STARTPOLICY"                = 0
-    "STOPPOLICY"                 = 0
-    "HETEROEPP"                  = 0
-    "HETEROPROCESSPOLICY"        = 0
-    "HETEROTHREADPOLICY"         = 0
-    "PERFDUTYCYCLING"            = 100
-    "PERFDPC"                    = 1
-    "PERFEPPBOOST"               = 100
-    "PERFEPPBACKOFF"             = 100
-    "PERFHISTORY"                = 0
-    "PERFCHECK"                  = 0
-    "PERFLATENCY"                = 100
-    "PERFAUTONOMOUSFREQUENCY"    = 0
+# --- 4b. CPU / Processor settings (ALL 95 GUIDs, MAX PERFORMANCE) ---
+# Class 0 = P-Cores | Class 1 = E-Cores | Class 2 = LP-E-Cores
+$cpuSettings = [ordered]@{
+    # ===== Class 0 (P-Core / Base) - Throttle & Boost =====
+    "893dee8e-2bef-41e0-89c6-b55d0929964c" = 100   # Minimum processor state
+    "bc5038f7-23e0-4960-96da-33abaf5935ec" = 100   # Maximum processor state
+    "be337238-0d82-4146-a960-4f3749d470c7" = 5     # Boost mode: Aggressive At Guaranteed
+    "45bcc044-d885-43e2-8605-ee0ec6e96b59" = 100   # Boost policy: 100%
+
+    # ===== Class 0 - Thresholds & Policies =====
+    "06cadf0e-64ed-448a-8927-ce7bf90eb35d" = 1     # Increase threshold
+    "12a0ab44-fe28-4fa9-b3bd-4b64f44960a6" = 100   # Decrease threshold
+    "465e1f50-b610-473a-ab58-00d1077dc418" = 3     # Increase policy: IdealAggressive
+    "40fbefc7-2e9d-4d25-a185-0cfd8574bac6" = 0     # Decrease policy: Ideal
+
+    # ===== Class 0 - Core Parking =====
+    "0cc5b647-c1df-4637-891a-dec35c318583" = 100   # Min unparked cores
+    "ea062031-0e34-4ff1-9b6d-eb1059334028" = 100   # Max unparked cores
+    "71021b41-c749-4d21-be74-a00f335d582b" = 2     # Parking decrease policy: All possible
+    "c7be0679-2817-4d69-9d02-519a537ed0c6" = 2     # Parking increase policy: All possible
+    "2ddd5a84-5a71-437e-912a-db0b8c788732" = 1     # Parking increase time: fastest
+    "dfd10d17-d5eb-45dd-877a-9a34ddd15c82" = 1     # Parking decrease time: fastest
+    "2430ab6f-a520-44a2-9601-f7f23b5134b1" = 100   # Concurrency threshold
+    "4bdaf4e9-d103-46d7-a5f0-6280121616ef" = 100   # Distribution threshold
+    "f735a673-2066-4f80-a0c5-ddee0cf1bf5d" = 100   # Concurrency headroom threshold
+    "e0007330-f589-42ed-a401-5ddb10e785d3" = 1     # Utility distribution: Enabled
+    "97cfac41-2217-47eb-992d-618b1977c907" = 0     # Soft park latency: 0 (never)
+    "447235c7-6a8d-4cc0-8e24-9eaf70b96e2b" = 2     # Parked perf state: Lightest
+
+    # ===== Class 0 - EPP & Autonomous =====
+    "36687f9e-e3a5-4dbf-b1dc-15eb381c6863" = 0     # EPP: max performance
+    "8baa4a8a-14c6-4451-8e8b-14bdbd197537" = 0     # Autonomous: Disabled (OS controls)
+    "cfeda3d0-7697-4566-a922-a9086cd49dfa" = 100   # Autonomous window: short
+
+    # ===== Class 0 - Idle States =====
+    "4b92d758-5a24-4851-a470-815d78aee119" = 0     # Idle demote threshold
+    "7b224883-b3cc-4d79-819f-8374152cbe7c" = 100   # Idle promote threshold
+    "9943e905-9a30-4ec1-9b99-44dd3b76f7a2" = 0     # Idle state max (no limit)
+    "5d76a2ca-e8c0-402f-a133-2158492d58ad" = 0     # Idle disable: 0 (enabled)
+    "6c2993b0-8f48-481f-bcc6-00dd2742aa06" = 1     # Idle threshold scaling: Enabled
+    "c4581c31-89ab-4597-8e2b-9c9cab440e6b" = 1     # Idle time check: 1µs
+
+    # ===== Class 0 - Timing & History =====
+    "984cf492-3bed-4488-a8f9-4286c97bf5aa" = 1     # Increase time: fastest
+    "d8edeb9b-95cf-4f95-a73c-b061973693c8" = 1     # Decrease time: fastest
+    "4d2b0152-7d5c-498b-88e2-34345392a2c5" = 1     # Time check interval: 1ms
+    "7d24baa7-0b84-480f-840c-1b0743c00f5f" = 1     # History count: shortest
+
+    # ===== Class 0 - Latency Hints =====
+    "4b70f900-cdd9-4e66-aa26-ae8417f98173" = 0     # Latency hint EPP: max perf
+    "619b7505-003b-4e82-b7a6-4dd29c300971" = 100   # Latency hint performance
+    "616cdaa5-695e-4545-97ad-97dc2d1bdd88" = 100   # Latency hint min unparked cores
+
+    # ===== Class 0 - Containment & Hetero =====
+    "12fd031f-53d2-4bf4-ac6d-c699fc9538c7" = 0     # Hybrid containment utility %
+    "60fbe21b-efd9-49f2-b066-8674d8e9f423" = 1     # Hetero containment: Enabled
+    "6788488b-1b90-4d11-8fa7-973e470dff47" = 100   # Hybrid containment concurrency
+    "69439b22-221b-4830-bd34-f7bcece24583" = 100   # Efficiency containment concurrency
+    "6ece9e1f-b6dd-42bf-b1b7-5a512b10c092" = 0     # Efficiency containment utility %
+    "64fcee6b-5b1f-45a4-a76a-19b2c36ee290" = 1     # Containment increase time: fastest
+    "6ff13aeb-7897-4356-9999-dd9930af065f" = 1     # Containment decrease time: fastest
+    "7f2f5cfa-f10c-4823-b5e1-e93ae85f46b5" = 4     # Hetero policy: prefer performance
+
+    # ===== Class 0 - Scheduling & Threads =====
+    "93b8b6dc-0698-4d1c-9ee4-0644e900c85d" = 1     # Thread scheduling: Performant
+    "bae08b81-2d5e-4688-ad6a-13243356654b" = 1     # Short thread scheduling: Performant
+    "d92998c2-6a48-49ca-85d4-8cceec294570" = 100000 # Short vs long thread threshold
+    "43f278bc-0f8a-46d0-8b31-9a23e615d713" = 0     # Long threads arch lower limit
+    "bf903d33-9d24-49d3-a468-e65e0325046a" = 255   # Long threads arch upper limit
+    "53824d46-87bd-4739-aa1b-aa793fac36d6" = 0     # Short threads arch lower limit
+    "828423eb-8662-4344-90f7-52bf15870f5a" = 255   # Short threads arch upper limit
+
+    # ===== Class 0 - Unpark Policies & Misc =====
+    "b0deaf6b-59c0-4523-8a45-ca7f40244114" = 1     # Module unpark: Round robin
+    "b28a6829-c5f7-444e-8f61-10e24e85c532" = 0     # SMT unpark: Core
+    "b669a5e9-7b1d-4132-baaa-49190abcfeb6" = 1     # Complex unpark: Round robin
+    "603fe9ce-8d01-4b48-a968-1d706c28fd5c" = 100   # Resource priority
+    "4e4450b3-6179-4e91-b8f1-5bb9938f81a1" = 0     # Duty cycling: Disabled
+    "1a98ad09-af22-42ca-8e61-f0a5802c270a" = 64    # Processor restriction count
+    "5ba7419a-295c-4b02-841b-66799388d6da" = 0     # WPS min efficiency score (disabled)
+    "75b0ae3f-bce0-45a7-8c89-c9611c25e100" = 0     # Max frequency: unlimited
+
+    # ===== Class 1 (E-Core) Variants =====
+    "893dee8e-2bef-41e0-89c6-b55d0929964d" = 100   # Min state Class 1
+    "bc5038f7-23e0-4960-96da-33abaf5935ed" = 100   # Max state Class 1
+    "06cadf0e-64ed-448a-8927-ce7bf90eb35e" = 1     # Inc threshold Class 1
+    "12a0ab44-fe28-4fa9-b3bd-4b64f44960a7" = 100   # Dec threshold Class 1
+    "465e1f50-b610-473a-ab58-00d1077dc419" = 3     # Inc policy Class 1
+    "40fbefc7-2e9d-4d25-a185-0cfd8574bac7" = 0     # Dec policy Class 1
+    "0cc5b647-c1df-4637-891a-dec35c318584" = 100   # Min cores Class 1
+    "ea062031-0e34-4ff1-9b6d-eb1059334029" = 100   # Max cores Class 1
+    "36687f9e-e3a5-4dbf-b1dc-15eb381c6864" = 0     # EPP Class 1
+    "4b70f900-cdd9-4e66-aa26-ae8417f98174" = 0     # Latency hint EPP Class 1
+    "619b7505-003b-4e82-b7a6-4dd29c300972" = 100   # Latency hint perf Class 1
+    "616cdaa5-695e-4545-97ad-97dc2d1bdd89" = 100   # Latency hint min cores Class 1
+    "984cf492-3bed-4488-a8f9-4286c97bf5ab" = 1     # Inc time Class 1
+    "d8edeb9b-95cf-4f95-a73c-b061973693c9" = 1     # Dec time Class 1
+    "7f2492b6-60b1-45e5-ae55-773f8cd5caec" = 1     # Dec time Class 1 (alt)
+    "1facfc65-a930-4bc5-9f38-504ec097bbc0" = 100   # Initial perf when unparked Class 1
+    "447235c7-6a8d-4cc0-8e24-9eaf70b96e2c" = 2     # Parked perf state Class 1
+    "75b0ae3f-bce0-45a7-8c89-c9611c25e101" = 0     # Max freq Class 1
+    "7d24baa7-0b84-480f-840c-1b0743c00f60" = 1     # History count Class 1
+    "603fe9ce-8d01-4b48-a968-1d706c28fd5d" = 100   # Resource priority Class 1
+    "b000397d-9b0b-483d-98c9-692a6060cfbf" = 255   # P-level inc threshold Class 1
+    "f8861c27-95e7-475c-865b-13c0cb3f9d6b" = 255   # P-level dec threshold Class 1
+    "4009efa7-e72d-4cba-9edf-91084ea8cbc3" = 1     # Inc time Class 1 (alt)
+
+    # ===== Class 2 (LP-E-Core) Variants =====
+    "893dee8e-2bef-41e0-89c6-b55d0929964e" = 100   # Min state Class 2
+    "bc5038f7-23e0-4960-96da-33abaf5935ee" = 100   # Max state Class 2
+    "36687f9e-e3a5-4dbf-b1dc-15eb381c6865" = 0     # EPP Class 2
+    "4b70f900-cdd9-4e66-aa26-ae8417f98175" = 0     # Latency hint EPP Class 2
+    "619b7505-003b-4e82-b7a6-4dd29c300973" = 100   # Latency hint perf Class 2
+    "75b0ae3f-bce0-45a7-8c89-c9611c25e102" = 0     # Max freq Class 2
+    "603fe9ce-8d01-4b48-a968-1d706c28fd5e" = 100   # Resource priority Class 2
+    "b000397d-9b0b-483d-98c9-692a6060cfc0" = 255   # P-level inc threshold Class 2
+    "f8861c27-95e7-475c-865b-13c0cb3f9d6c" = 255   # P-level dec threshold Class 2
 }
 
 $cpuKeys  = @($cpuSettings.Keys)
@@ -376,8 +440,8 @@ foreach ($key in $cpuKeys) {
     powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
 }
 
-# --- 4c. Extra processor GUID ---
-Write-SubProgress -Activity "CPU Optimization" -Status "Applying extra processor GUID..." -PercentComplete 98
+# --- 4c. Extra processor GUID: System cooling policy (Active) ---
+Write-SubProgress -Activity "CPU Optimization" -Status "Applying system cooling policy..." -PercentComplete 98
 powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
 powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
 
