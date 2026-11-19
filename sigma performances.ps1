@@ -9,11 +9,12 @@
 #   3. PowerCfg Registry
 #   4. CPU Optimization (AC / DC)
 #   5. Network Throttle (QoS 1-3000 Mbps)
+#   6. Windows Defender  -> DISABLE or RESTORE (menu choice, with TP bypass attempts)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
 # =============================================================================
 
-$script:TotalSteps  = 5
+$script:TotalSteps  = 6
 $script:CurrentStep = 0
 
 # -----------------------------------------------------------------------------
@@ -56,6 +57,7 @@ Write-Host "   2. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   3. PowerCfg Registry values" -ForegroundColor Yellow
 Write-Host "   4. CPU Optimization (AC / DC)" -ForegroundColor Yellow
 Write-Host "   5. Network Throttle (QoS)" -ForegroundColor Yellow
+Write-Host "   6. Windows Defender -> Disable OR Restore (you choose at runtime)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
 Write-Host ""
@@ -141,7 +143,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "Device Cleanup"
 Write-OverallProgress -Status "Device Cleanup complete" -SubPercent 100
-Write-Host "  [1/5] Device Cleanup ............................ DONE" -ForegroundColor Green
+Write-Host "  [1/6] Device Cleanup ............................ DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 2 - TELEMETRY & TRACKING REMOVAL
@@ -222,7 +224,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "Telemetry Removal"
 Write-OverallProgress -Status "Telemetry Removal complete" -SubPercent 100
-Write-Host "  [2/5] Telemetry & Tracking Removal .............. DONE" -ForegroundColor Green
+Write-Host "  [2/6] Telemetry & Tracking Removal .............. DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 3 - POWERCfg REGISTRY ONLY
@@ -291,7 +293,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "PowerCfg Registry"
 Write-OverallProgress -Status "PowerCfg Registry complete" -SubPercent 100
-Write-Host "  [3/5] PowerCfg Registry ......................... DONE" -ForegroundColor Green
+Write-Host "  [3/6] PowerCfg Registry ......................... DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 4 - CPU OPTIMIZATION (AC / DC)
@@ -397,7 +399,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "CPU Optimization"
 Write-OverallProgress -Status "CPU Optimization complete" -SubPercent 100
-Write-Host "  [4/5] CPU Optimization .......................... DONE" -ForegroundColor Green
+Write-Host "  [4/6] CPU Optimization .......................... DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 5 - NETWORK THROTTLE (QoS) - menu preserved from original
@@ -540,7 +542,316 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "Network Throttle"
 Write-OverallProgress -Status "Network Throttle complete" -SubPercent 100
-Write-Host "  [5/5] Network Throttle .......................... DONE" -ForegroundColor Green
+Write-Host "  [5/6] Network Throttle .......................... DONE" -ForegroundColor Green
+
+# =============================================================================
+# STEP 6 - WINDOWS DEFENDER  (DISABLE / RESTORE / SKIP)
+# =============================================================================
+$script:CurrentStep = 6
+Write-OverallProgress -Status "Windows Defender" -SubPercent 0
+
+$errorLog = "$env:TEMP\sigma_defender_errors.log"
+if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
+
+# -----------------------------------------------------------------------------
+# Helper: silently delete a value if it exists (logs failures)
+# -----------------------------------------------------------------------------
+function Remove-RegValue {
+    param([string]$Path, [string]$Name)
+    try {
+        if (Test-Path $Path) {
+            $prop = Get-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+            if ($null -ne $prop) {
+                Remove-ItemProperty -Path $Path -Name $Name -Force -ErrorAction Stop
+            }
+        }
+    } catch {
+        Add-Content -Path $errorLog -Value "$Path\$Name : $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Helper: silently write a DWORD (logs failures)
+# -----------------------------------------------------------------------------
+function Set-RegDword {
+    param([string]$Path, [string]$Name, [int]$Value)
+    try {
+        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+        New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+    } catch {
+        Add-Content -Path $errorLog -Value "$Path\$Name : $($_.Exception.Message)"
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Helper: read current Tamper Protection state (returns $true/$false/$null)
+# -----------------------------------------------------------------------------
+function Get-TamperProtectionState {
+    try {
+        $status = Get-MpComputerStatus -ErrorAction Stop
+        return [bool]$status.IsTamperProtected
+    } catch {
+        # Fallback: read the Features key
+        try {
+            $tp = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features" -Name "TamperProtection" -ErrorAction Stop).TamperProtection
+            if ($tp -eq 5) { return $true }
+            if ($tp -eq 4) { return $false }
+        } catch { }
+        return $null
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Force-DisableTamperProtection
+# Tries multiple methods to turn TP off. Returns $true if any succeeds.
+# -----------------------------------------------------------------------------
+function Force-DisableTamperProtection {
+    Write-Host "  [TP] Attempting to disable Tamper Protection automatically..." -ForegroundColor Cyan
+
+    $featuresKey  = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
+    $winDefendKey = "HKLM:\SYSTEM\CurrentControlSet\Services\WinDefend"
+
+    # --- Method 1: Set-MpPreference -DisableTamperProtection ---
+    try {
+        Write-Host "    [TP-1] Set-MpPreference -DisableTamperProtection `$true ..." -ForegroundColor Gray
+        Set-MpPreference -DisableTamperProtection $true -ErrorAction Stop -WarningAction SilentlyContinue 2>> $errorLog
+    } catch {
+        Add-Content -Path $errorLog -Value "TP-Method1 (Set-MpPreference) : $($_.Exception.Message)"
+    }
+
+    # --- Method 2: Registry write to WinDefend service key + Features key ---
+    Write-Host "    [TP-2] Registry writes (WinDefend service key + Features key) ..." -ForegroundColor Gray
+    Set-RegDword -Path $winDefendKey -Name "TamperProtection" -Value 4
+    Set-RegDword -Path $featuresKey  -Name "TamperProtection" -Value 4
+
+    # --- Method 3: Remove any policy that may re-enable TP ---
+    Write-Host "    [TP-3] Removing DisableTamperProtection policy override ..." -ForegroundColor Gray
+    Remove-RegValue -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender" -Name "DisableTamperProtection"
+
+    # --- Verify ---
+    Start-Sleep -Milliseconds 500
+    $state = Get-TamperProtectionState
+    if ($state -eq $false) {
+        Write-Host "    [TP] SUCCESS: Tamper Protection is now OFF." -ForegroundColor Green
+        return $true
+    }
+
+    Write-Host "    [TP] Could not disable Tamper Protection automatically." -ForegroundColor Yellow
+    Write-Host "         You must turn it OFF manually once:" -ForegroundColor Yellow
+    Write-Host "         Windows Security -> Virus & threat protection -> Manage settings -> Tamper Protection = Off" -ForegroundColor Yellow
+    Write-Host "         Then re-run the Disable option." -ForegroundColor Yellow
+    return $false
+}
+
+# =============================================================================
+# FUNCTION 1 - DISABLE WINDOWS DEFENDER
+# =============================================================================
+function Disable-DefenderProtection {
+    $defenderPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
+    $rtpPolicy      = "$defenderPolicy\Real-Time Protection"
+    $sigPolicy      = "$defenderPolicy\Signature Updates"
+    $spynetPolicy   = "$defenderPolicy\Spynet"
+    $featuresKey    = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
+
+    # --- First: try to force Tamper Protection off ---
+    $tpDisabled = Force-DisableTamperProtection
+
+    if (-not $tpDisabled) {
+        Write-Host "  [WARNING] Proceeding with policy DWORDs anyway; they may be ignored while TP is ON." -ForegroundColor Yellow
+    }
+
+    # --- Root DWORDs = 1 ---
+    Write-SubProgress -Activity "Defender Disable" -Status "Creating Defender root DWORDs..." -PercentComplete 10
+    $rootValues = @(
+        "DisableAntiSpyware",
+        "DisableRealtimeMonitoring",
+        "DisableAntiVirus",
+        "DisableSpecialRunningModes",
+        "DisableRoutinelyTackingAction",
+        "ServiceKeepAlive"
+    )
+    foreach ($v in $rootValues) { Set-RegDword -Path $defenderPolicy -Name $v -Value 1 }
+
+    # --- Real-Time Protection DWORDs = 1 ---
+    Write-SubProgress -Activity "Defender Disable" -Status "Creating Real-Time Protection DWORDs..." -PercentComplete 25
+    if (-not (Test-Path $rtpPolicy)) { New-Item -Path $rtpPolicy -Force | Out-Null }
+    $rtpValues = @(
+        "DisableBehaviorMonitoring",
+        "DisableOnAccesProtection",
+        "DisableRealtimeMonitoring",
+        "DisableScanOnRealtimeEnable"
+    )
+    foreach ($v in $rtpValues) { Set-RegDword -Path $rtpPolicy -Name $v -Value 1 }
+
+    # --- Signature Updates DWORD = 1 ---
+    Write-SubProgress -Activity "Defender Disable" -Status "Creating Signature Updates DWORD..." -PercentComplete 35
+    if (-not (Test-Path $sigPolicy)) { New-Item -Path $sigPolicy -Force | Out-Null }
+    Set-RegDword -Path $sigPolicy -Name "ForceUpdateFromMU" -Value 1
+
+    # --- Spynet DWORD = 1 ---
+    Write-SubProgress -Activity "Defender Disable" -Status "Creating Spynet DWORD..." -PercentComplete 45
+    if (-not (Test-Path $spynetPolicy)) { New-Item -Path $spynetPolicy -Force | Out-Null }
+    Set-RegDword -Path $spynetPolicy -Name "DisableBlockAtFirstSeen" -Value 1
+
+    # --- Final Tamper Protection write attempt ---
+    Write-SubProgress -Activity "Defender Disable" -Status "Final Tamper Protection write..." -PercentComplete 60
+    Set-RegDword -Path $featuresKey -Name "TamperProtection" -Value 4
+    Set-RegDword -Path $defenderPolicy -Name "DisableTamperProtection" -Value 1
+
+    # --- Stop & disable Defender services ---
+    Write-SubProgress -Activity "Defender Disable" -Status "Stopping/disabling Defender services..." -PercentComplete 75
+    $services = @("WinDefend", "WdNisSvc", "Sense", "SecurityHealthService", "wscsvc")
+    foreach ($name in $services) {
+        try {
+            Stop-Service -Name $name -Force -ErrorAction SilentlyContinue 2>> $errorLog
+            Set-Service  -Name $name -StartupType Disabled -ErrorAction Stop 2>> $errorLog
+        } catch {
+            Add-Content -Path $errorLog -Value "$name : $($_.Exception.Message)"
+        }
+    }
+
+    Write-SubProgress -Activity "Defender Disable" -Status "Disable sequence finished." -PercentComplete 100
+}
+
+# =============================================================================
+# FUNCTION 2 - RESTORE / ENABLE WINDOWS DEFENDER
+# =============================================================================
+function Restore-DefenderProtection {
+    $defenderPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
+    $rtpPolicy      = "$defenderPolicy\Real-Time Protection"
+    $sigPolicy      = "$defenderPolicy\Signature Updates"
+    $spynetPolicy   = "$defenderPolicy\Spynet"
+    $featuresKey    = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
+    $winDefendKey   = "HKLM:\SYSTEM\CurrentControlSet\Services\WinDefend"
+
+    # --- 6a. Root DWORDs ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Defender root DWORDs..." -PercentComplete 10
+    $rootValues = @(
+        "DisableAntiSpyware",
+        "DisableRealtimeMonitoring",
+        "DisableAntiVirus",
+        "DisableSpecialRunningModes",
+        "DisableRoutinelyTackingAction",
+        "ServiceKeepAlive",
+        "DisableTamperProtection"
+    )
+    foreach ($v in $rootValues) { Remove-RegValue -Path $defenderPolicy -Name $v }
+
+    # --- 6b. Real-Time Protection DWORDs ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Real-Time Protection DWORDs..." -PercentComplete 25
+    $rtpValues = @(
+        "DisableBehaviorMonitoring",
+        "DisableOnAccesProtection",
+        "DisableRealtimeMonitoring",
+        "DisableScanOnRealtimeEnable"
+    )
+    foreach ($v in $rtpValues) { Remove-RegValue -Path $rtpPolicy -Name $v }
+
+    # --- 6c. Signature Updates DWORD ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Signature Updates DWORDs..." -PercentComplete 35
+    foreach ($v in @("ForceUpdateFromMU")) { Remove-RegValue -Path $sigPolicy -Name $v }
+
+    # --- 6d. Spynet DWORD ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Spynet DWORDs..." -PercentComplete 45
+    foreach ($v in @("DisableBlockAtFirstSeen")) { Remove-RegValue -Path $spynetPolicy -Name $v }
+
+    # --- 6e. Re-enable Tamper Protection (5 = enabled) ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Re-enabling Tamper Protection..." -PercentComplete 60
+    Set-RegDword -Path $featuresKey  -Name "TamperProtection" -Value 5
+    Set-RegDword -Path $winDefendKey -Name "TamperProtection" -Value 5
+
+    # --- 6f. Re-enable + start Defender services ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Re-enabling Defender services..." -PercentComplete 75
+    $services = @(
+        @{ Name = "WinDefend";             StartupType = "Automatic" },
+        @{ Name = "WdNisSvc";              StartupType = "Manual"    },
+        @{ Name = "Sense";                 StartupType = "Manual"    },
+        @{ Name = "SecurityHealthService"; StartupType = "Manual"    },
+        @{ Name = "wscsvc";                StartupType = "Automatic" }
+    )
+    foreach ($svc in $services) {
+        try {
+            Set-Service   -Name $svc.Name -StartupType $svc.StartupType -ErrorAction Stop 2>> $errorLog
+            Start-Service -Name $svc.Name -ErrorAction SilentlyContinue 2>> $errorLog
+        } catch {
+            Add-Content -Path $errorLog -Value "$($svc.Name) : $($_.Exception.Message)"
+        }
+    }
+
+    # --- 6g. Refresh signatures ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Refreshing Defender signatures..." -PercentComplete 90
+    $mpCmd = Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"
+    if (Test-Path $mpCmd) {
+        & $mpCmd -SignatureUpdate 2>> $errorLog | Out-Null
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Step 6 – show current TP state, then menu: Disable / Restore / Skip
+# -----------------------------------------------------------------------------
+Clear-Host
+Write-Host ""
+Write-Host "========== STEP 6 - WINDOWS DEFENDER ==========" -ForegroundColor Green
+Write-Host ""
+
+$tpState = Get-TamperProtectionState
+switch ($tpState) {
+    $true   { Write-Host "[INFO] Current Tamper Protection state: ON"  -ForegroundColor Cyan }
+    $false  { Write-Host "[INFO] Current Tamper Protection state: OFF" -ForegroundColor Cyan }
+    default { Write-Host "[INFO] Current Tamper Protection state: UNKNOWN" -ForegroundColor DarkGray }
+}
+Write-Host ""
+
+Write-Host "Choose what to do with Windows Defender:" -ForegroundColor Yellow
+Write-Host "   1. DISABLE  Defender (policy DWORDs = 1, stop services, try to turn TP off)" -ForegroundColor White
+Write-Host "   2. RESTORE  Defender (delete DWORDs, re-enable Tamper Protection)" -ForegroundColor White
+Write-Host "   3. SKIP     (leave Defender untouched)" -ForegroundColor White
+Write-Host ""
+
+$defChoice = Read-Host "Enter 1, 2 or 3"
+
+switch ($defChoice) {
+
+    "1" {
+        Write-Host ""
+        Write-Host "[WARNING] Disabling Defender removes real-time protection." -ForegroundColor Red
+        $verify = Read-Host "Type 'YES' to confirm DISABLE"
+        if ($verify -eq "YES") {
+            Disable-DefenderProtection
+            Write-Host "  [6/6] Windows Defender - DISABLE sequence finished." -ForegroundColor Green
+        } else {
+            Write-Host "  Defender disable skipped (no confirmation)." -ForegroundColor Yellow
+        }
+    }
+
+    "2" {
+        Write-Host ""
+        Write-Host "[INFO] Restoring Windows Defender protection..." -ForegroundColor Cyan
+        Restore-DefenderProtection
+        Write-Host "  [6/6] Windows Defender - RESTORED ............... OK" -ForegroundColor Green
+    }
+
+    "3" {
+        Write-Host "  Defender step skipped." -ForegroundColor Yellow
+    }
+
+    default {
+        Write-Host "  Invalid choice. Defender step skipped." -ForegroundColor Yellow
+    }
+}
+
+# Error report
+if (Test-Path $errorLog) {
+    $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
+    if ($errorCount -gt 0) {
+        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
+    } else {
+        Remove-Item $errorLog -Force
+    }
+}
+
+Complete-SubProgress -Activity "Windows Defender"
+Write-OverallProgress -Status "Windows Defender step complete" -SubPercent 100
 
 # =============================================================================
 # FINAL SUMMARY
@@ -549,11 +860,12 @@ Write-Progress -Id 0 -Activity "SIGMA PERFORMANCES - All Optimizations" -Complet
 
 Write-Host ""
 Write-Host "========== SIGMA PERFORMANCES - SUMMARY ==========" -ForegroundColor Green
-Write-Host "   [1/5] Device Cleanup ............................ OK" -ForegroundColor Green
-Write-Host "   [2/5] Telemetry & Tracking Removal .............. OK" -ForegroundColor Green
-Write-Host "   [3/5] PowerCfg Registry ......................... OK" -ForegroundColor Green
-Write-Host "   [4/5] CPU Optimization .......................... OK" -ForegroundColor Green
-Write-Host "   [5/5] Network Throttle .......................... OK" -ForegroundColor Green
+Write-Host "   [1/6] Device Cleanup ............................ OK" -ForegroundColor Green
+Write-Host "   [2/6] Telemetry & Tracking Removal .............. OK" -ForegroundColor Green
+Write-Host "   [3/6] PowerCfg Registry ......................... OK" -ForegroundColor Green
+Write-Host "   [4/6] CPU Optimization .......................... OK" -ForegroundColor Green
+Write-Host "   [5/6] Network Throttle .......................... OK" -ForegroundColor Green
+Write-Host "   [6/6] Windows Defender (disable / restore) ...... OK" -ForegroundColor Green
 Write-Host ""
 Write-Host "[SUCCESS] All optimizations applied." -ForegroundColor Green
 Write-Host "[INFO] System reboot required." -ForegroundColor Yellow
