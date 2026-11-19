@@ -9,12 +9,11 @@
 #   3. Telemetry Removal
 #   4. PowerCfg Registry
 #   5. CPU Optimization (AC / DC)
-#   6. Network Throttle (QoS 1-3000 Mbps)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
 # =============================================================================
 
-$script:TotalSteps  = 6
+$script:TotalSteps  = 5
 $script:CurrentStep = 0
 
 # -----------------------------------------------------------------------------
@@ -57,7 +56,6 @@ Write-Host "   2. Device Cleanup (Unknown + Ghost devices)" -ForegroundColor Yel
 Write-Host "   3. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   4. PowerCfg Registry values" -ForegroundColor Yellow
 Write-Host "   5. CPU Optimization (AC / DC)" -ForegroundColor Yellow
-Write-Host "   6. Network Throttle (QoS)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
 Write-Host ""
@@ -187,9 +185,9 @@ function Disable-DefenderProtection {
 }
 
 # =============================================================================
-# FUNCTION 2 - RESTORE / ENABLE WINDOWS DEFENDER
-#   Deletes every DWORD created above, re-enables Tamper Protection (=5),
-#   and re-starts Defender services.
+# FUNCTION 2 - RESTORE WINDOWS DEFENDER
+#   ONLY deletes every DWORD value created by Disable-DefenderProtection.
+#   No services, no TamperProtection = 5, no signature refresh.
 # =============================================================================
 function Restore-DefenderProtection {
     $defenderPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
@@ -198,7 +196,7 @@ function Restore-DefenderProtection {
     $spynetPolicy   = "$defenderPolicy\Spynet"
     $featuresKey    = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
 
-    # --- 1a. Root DWORDs ---
+    # --- Root DWORDs ---
     Write-SubProgress -Activity "Defender Restore" -Status "Deleting Defender root DWORDs..." -PercentComplete 10
     $rootValues = @(
         "DisableAntiSpyware",
@@ -211,8 +209,8 @@ function Restore-DefenderProtection {
     )
     foreach ($v in $rootValues) { Remove-RegValue -Path $defenderPolicy -Name $v }
 
-    # --- 1b. Real-Time Protection DWORDs ---
-    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Real-Time Protection DWORDs..." -PercentComplete 25
+    # --- Real-Time Protection DWORDs ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Real-Time Protection DWORDs..." -PercentComplete 40
     $rtpValues = @(
         "DisableBehaviorMonitoring",
         "DisableOnAccesProtection",
@@ -221,51 +219,17 @@ function Restore-DefenderProtection {
     )
     foreach ($v in $rtpValues) { Remove-RegValue -Path $rtpPolicy -Name $v }
 
-    # --- 1c. Signature Updates DWORD ---
-    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Signature Updates DWORDs..." -PercentComplete 35
+    # --- Signature Updates DWORD ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Signature Updates DWORD..." -PercentComplete 60
     foreach ($v in @("ForceUpdateFromMU")) { Remove-RegValue -Path $sigPolicy -Name $v }
 
-    # --- 1d. Spynet DWORD ---
-    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Spynet DWORDs..." -PercentComplete 45
+    # --- Spynet DWORD ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting Spynet DWORD..." -PercentComplete 75
     foreach ($v in @("DisableBlockAtFirstSeen")) { Remove-RegValue -Path $spynetPolicy -Name $v }
 
-    # --- 1e. Re-enable Tamper Protection (5 = enabled) ---
-    Write-SubProgress -Activity "Defender Restore" -Status "Re-enabling Tamper Protection..." -PercentComplete 60
-    try {
-        if (-not (Test-Path $featuresKey)) { New-Item -Path $featuresKey -Force | Out-Null }
-        New-ItemProperty -Path $featuresKey -Name "TamperProtection" `
-            -Value 5 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-    }
-    catch {
-        # If Tamper Protection is already ON, this write is blocked by design.
-        Add-Content -Path $errorLog -Value "TamperProtection(enable) : $($_.Exception.Message)"
-    }
-
-    # --- 1f. Re-enable + start Defender services ---
-    Write-SubProgress -Activity "Defender Restore" -Status "Re-enabling Defender services..." -PercentComplete 75
-    $services = @(
-        @{ Name = "WinDefend";             StartupType = "Automatic" },
-        @{ Name = "WdNisSvc";              StartupType = "Manual"    },
-        @{ Name = "Sense";                 StartupType = "Manual"    },
-        @{ Name = "SecurityHealthService"; StartupType = "Manual"    },
-        @{ Name = "wscsvc";                StartupType = "Automatic" }
-    )
-    foreach ($svc in $services) {
-        try {
-            Set-Service   -Name $svc.Name -StartupType $svc.StartupType -ErrorAction Stop 2>> $errorLog
-            Start-Service -Name $svc.Name -ErrorAction SilentlyContinue 2>> $errorLog
-        }
-        catch {
-            Add-Content -Path $errorLog -Value "$($svc.Name) : $($_.Exception.Message)"
-        }
-    }
-
-    # --- 1g. Refresh signatures ---
-    Write-SubProgress -Activity "Defender Restore" -Status "Refreshing Defender signatures..." -PercentComplete 90
-    $mpCmd = Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"
-    if (Test-Path $mpCmd) {
-        & $mpCmd -SignatureUpdate 2>> $errorLog | Out-Null
-    }
+    # --- TamperProtection DWORD (added by disable) ---
+    Write-SubProgress -Activity "Defender Restore" -Status "Deleting TamperProtection DWORD..." -PercentComplete 90
+    Remove-RegValue -Path $featuresKey -Name "TamperProtection"
 }
 
 # -----------------------------------------------------------------------------
@@ -277,7 +241,7 @@ Write-Host "========== STEP 1 - WINDOWS DEFENDER ==========" -ForegroundColor Gr
 Write-Host ""
 Write-Host "Choose what to do with Windows Defender:" -ForegroundColor Yellow
 Write-Host "   1. DISABLE  Defender (apply policy DWORDs = 1, stop services)" -ForegroundColor White
-Write-Host "   2. RESTORE  Defender (delete DWORDs, re-enable Tamper Protection)" -ForegroundColor White
+Write-Host "   2. RESTORE  Defender (delete the added DWORD values only)" -ForegroundColor White
 Write-Host "   3. SKIP     (leave Defender untouched)" -ForegroundColor White
 Write-Host ""
 
@@ -291,7 +255,7 @@ switch ($defChoice) {
         $verify = Read-Host "Type 'YES' to confirm DISABLE"
         if ($verify -eq "YES") {
             Disable-DefenderProtection
-            Write-Host "  [1/6] Windows Defender - DISABLED ............... OK" -ForegroundColor Green
+            Write-Host "  [1/5] Windows Defender - DISABLED ............... OK" -ForegroundColor Green
         } else {
             Write-Host "  Defender disable skipped (no confirmation)." -ForegroundColor Yellow
         }
@@ -299,9 +263,9 @@ switch ($defChoice) {
 
     "2" {
         Write-Host ""
-        Write-Host "[INFO] Restoring Windows Defender protection..." -ForegroundColor Cyan
+        Write-Host "[INFO] Removing Defender DWORD values..." -ForegroundColor Cyan
         Restore-DefenderProtection
-        Write-Host "  [1/6] Windows Defender - RESTORED ............... OK" -ForegroundColor Green
+        Write-Host "  [1/5] Windows Defender - RESTORED ............... OK" -ForegroundColor Green
     }
 
     "3" {
@@ -397,7 +361,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "Device Cleanup"
 Write-OverallProgress -Status "Device Cleanup complete" -SubPercent 100
-Write-Host "  [2/6] Device Cleanup ............................ DONE" -ForegroundColor Green
+Write-Host "  [2/5] Device Cleanup ............................ DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 3 - TELEMETRY & TRACKING REMOVAL
@@ -478,7 +442,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "Telemetry Removal"
 Write-OverallProgress -Status "Telemetry Removal complete" -SubPercent 100
-Write-Host "  [3/6] Telemetry & Tracking Removal .............. DONE" -ForegroundColor Green
+Write-Host "  [3/5] Telemetry & Tracking Removal .............. DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 4 - POWERCfg REGISTRY ONLY
@@ -547,7 +511,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "PowerCfg Registry"
 Write-OverallProgress -Status "PowerCfg Registry complete" -SubPercent 100
-Write-Host "  [4/6] PowerCfg Registry ......................... DONE" -ForegroundColor Green
+Write-Host "  [4/5] PowerCfg Registry ......................... DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 5 - CPU OPTIMIZATION (AC / DC)
@@ -653,150 +617,7 @@ if (Test-Path $errorLog) {
 
 Complete-SubProgress -Activity "CPU Optimization"
 Write-OverallProgress -Status "CPU Optimization complete" -SubPercent 100
-Write-Host "  [5/6] CPU Optimization .......................... DONE" -ForegroundColor Green
-
-# =============================================================================
-# STEP 6 - NETWORK THROTTLE (QoS) - menu preserved from original
-# =============================================================================
-$script:CurrentStep = 6
-Write-OverallProgress -Status "Network Throttle" -SubPercent 0
-
-$PolicyPrefix = "LimitPCto"
-$MinMbps      = 1
-$MaxMbps      = 3000
-
-$errorLog = "$env:TEMP\sigma_netqos_errors.log"
-if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
-
-function Set-QosLimit {
-    param(
-        [Parameter(Mandatory = $true)]
-        [ValidateRange(1, 3000)]
-        [int]$Mbps
-    )
-    $bits       = [uint64]$Mbps * 1000000
-    $policyName = "$PolicyPrefix$Mbps"
-
-    Get-NetQosPolicy -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "$PolicyPrefix*" } |
-        ForEach-Object {
-            Remove-NetQosPolicy -Name $_.Name -Confirm:$false -ErrorAction SilentlyContinue 2>> $errorLog
-        }
-
-    New-NetQosPolicy -Name $policyName `
-        -ThrottleRateActionBitsPerSecond $bits `
-        -ErrorAction SilentlyContinue 2>> $errorLog
-}
-
-function Remove-AllLimits {
-    $policies = Get-NetQosPolicy -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "$PolicyPrefix*" }
-
-    if (-not $policies) {
-        Write-Host "[INFO] No '$PolicyPrefix*' QoS policy is applied." -ForegroundColor DarkGray
-        return
-    }
-
-    foreach ($p in $policies) {
-        Remove-NetQosPolicy -Name $p.Name -Confirm:$false -ErrorAction SilentlyContinue 2>> $errorLog
-        Write-Host "[REMOVED] $($p.Name)" -ForegroundColor Green
-    }
-}
-
-function Show-AllLimits {
-    $policies = Get-NetQosPolicy -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "$PolicyPrefix*" }
-
-    if (-not $policies) {
-        Write-Host "[INFO] No '$PolicyPrefix*' QoS policy is applied." -ForegroundColor DarkGray
-        return
-    }
-
-    foreach ($p in $policies) {
-        $bits = $null
-        if ($p.PSObject.Properties.Name -contains 'ThrottleRateActionBitsPerSecond') {
-            $bits = [uint64]$p.ThrottleRateActionBitsPerSecond
-        }
-        elseif ($p.PSObject.Properties.Name -contains 'ThrottleRateAction') {
-            $bits = [uint64]$p.ThrottleRateAction
-        }
-
-        if ($bits -gt 0) {
-            $mbps = [math]::Round($bits / 1000000, 3)
-            Write-Host "[ACTIVE] $($p.Name)  ->  $mbps Mbps ($bits bits/s)" -ForegroundColor Cyan
-        } else {
-            Write-Host "[ACTIVE] $($p.Name)  ->  unknown" -ForegroundColor Cyan
-        }
-    }
-}
-
-function Show-Menu {
-    Write-Host ""
-    Write-Host "1. Apply throttle ($MinMbps-$MaxMbps Mbps)" -ForegroundColor White
-    Write-Host "2. Remove all throttles" -ForegroundColor White
-    Write-Host "3. Show applied throttles" -ForegroundColor White
-    Write-Host "4. Quit" -ForegroundColor White
-    Write-Host ""
-}
-
-do {
-    Show-Menu
-    $choice = Read-Host "Choose an option (1-4)"
-
-    switch ($choice) {
-        "1" {
-            $inputMbps = Read-Host "Enter Mbps ($MinMbps-$MaxMbps)"
-            if ($inputMbps -match '^\d+$') {
-                $mbpsInt = [int]$inputMbps
-                if ($mbpsInt -ge $MinMbps -and $mbpsInt -le $MaxMbps) {
-                    Write-SubProgress -Activity "Network Throttle" -Status "Applying throttle: $mbpsInt Mbps..." -PercentComplete 50
-                    Set-QosLimit -Mbps $mbpsInt
-                    Write-SubProgress -Activity "Network Throttle" -Status "Throttle applied." -PercentComplete 100
-                }
-                else {
-                    Write-Host "[ERROR] Value must be between $MinMbps and $MaxMbps." -ForegroundColor Red
-                }
-            }
-            else {
-                Write-Host "[ERROR] Enter a whole number." -ForegroundColor Red
-            }
-        }
-
-        "2" {
-            Write-SubProgress -Activity "Network Throttle" -Status "Removing all '$PolicyPrefix*' policies..." -PercentComplete 50
-            Remove-AllLimits
-            Write-SubProgress -Activity "Network Throttle" -Status "Throttles removed." -PercentComplete 100
-        }
-
-        "3" {
-            Write-Host ""
-            Write-Host "[INFO] Currently applied throttles:" -ForegroundColor Cyan
-            Show-AllLimits
-        }
-
-        "4" {
-            Write-SubProgress -Activity "Network Throttle" -Status "No change selected." -PercentComplete 100
-        }
-
-        default {
-            Write-Host "[ERROR] Invalid choice." -ForegroundColor Red
-        }
-    }
-} until ($choice -eq "4")
-
-# Error report
-if (Test-Path $errorLog) {
-    $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else {
-        Remove-Item $errorLog -Force
-    }
-}
-
-Complete-SubProgress -Activity "Network Throttle"
-Write-OverallProgress -Status "Network Throttle complete" -SubPercent 100
-Write-Host "  [6/6] Network Throttle .......................... DONE" -ForegroundColor Green
+Write-Host "  [5/5] CPU Optimization .......................... DONE" -ForegroundColor Green
 
 # =============================================================================
 # FINAL SUMMARY
@@ -805,12 +626,11 @@ Write-Progress -Id 0 -Activity "SIGMA PERFORMANCES - All Optimizations" -Complet
 
 Write-Host ""
 Write-Host "========== SIGMA PERFORMANCES - SUMMARY ==========" -ForegroundColor Green
-Write-Host "   [1/6] Windows Defender (disable / restore) ...... OK" -ForegroundColor Green
-Write-Host "   [2/6] Device Cleanup ............................ OK" -ForegroundColor Green
-Write-Host "   [3/6] Telemetry & Tracking Removal .............. OK" -ForegroundColor Green
-Write-Host "   [4/6] PowerCfg Registry ......................... OK" -ForegroundColor Green
-Write-Host "   [5/6] CPU Optimization .......................... OK" -ForegroundColor Green
-Write-Host "   [6/6] Network Throttle .......................... OK" -ForegroundColor Green
+Write-Host "   [1/5] Windows Defender (disable / restore) ...... OK" -ForegroundColor Green
+Write-Host "   [2/5] Device Cleanup ............................ OK" -ForegroundColor Green
+Write-Host "   [3/5] Telemetry & Tracking Removal .............. OK" -ForegroundColor Green
+Write-Host "   [4/5] PowerCfg Registry ......................... OK" -ForegroundColor Green
+Write-Host "   [5/5] CPU Optimization .......................... OK" -ForegroundColor Green
 Write-Host ""
 Write-Host "[SUCCESS] All optimizations applied." -ForegroundColor Green
 Write-Host "[INFO] System reboot required." -ForegroundColor Yellow
