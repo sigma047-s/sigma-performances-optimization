@@ -5,10 +5,10 @@
 # -----------------------------------------------------------------------------
 # Order:
 #   1. Windows Defender  -> DISABLE or RESTORE (menu choice)
-#   2. Device Cleanup   (Unknown + Ghost devices)
+#   2. Device Cleanup    (Unknown + Ghost devices)
 #   3. Telemetry Removal
 #   4. PowerCfg Registry
-#   5. CPU Optimization (AC / DC)
+#   5. CPU Optimization  (AC / DC)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
 # =============================================================================
@@ -43,19 +43,29 @@ function Complete-SubProgress {
     Write-Progress -Id 1 -ParentId 0 -Activity $Activity -Completed
 }
 
+# -----------------------------------------------------------------------------
+# Kills any lingering progress bars so they can't overwrite console text.
+# Call this before every Clear-Host and before every Read-Host menu prompt.
+# -----------------------------------------------------------------------------
+function Reset-AllProgress {
+    Write-Progress -Id 1 -ParentId 0 -Activity " " -Completed
+    Write-Progress -Id 0 -Activity " " -Completed
+}
+
 # =============================================================================
 # INTRO + SINGLE CONFIRMATION
 # =============================================================================
+Reset-AllProgress
 Clear-Host
 Write-Host ""
 Write-Host "========== SIGMA PERFORMANCES ==========" -ForegroundColor Green
 Write-Host ""
 Write-Host "[WARNING] This will apply ALL of the following, in order:" -ForegroundColor Yellow
-Write-Host "   1. Windows Defender -> Disable OR Restore (you choose at runtime)" -ForegroundColor Yellow
-Write-Host "   2. Device Cleanup (Unknown + Ghost devices)" -ForegroundColor Yellow
+Write-Host "   1. Windows Defender  -> Disable OR Restore (you choose at runtime)" -ForegroundColor Yellow
+Write-Host "   2. Device Cleanup    (Unknown + Ghost devices)" -ForegroundColor Yellow
 Write-Host "   3. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   4. PowerCfg Registry values" -ForegroundColor Yellow
-Write-Host "   5. CPU Optimization (AC / DC)" -ForegroundColor Yellow
+Write-Host "   5. CPU Optimization  (AC / DC)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
 Write-Host ""
@@ -235,14 +245,18 @@ function Restore-DefenderProtection {
 # -----------------------------------------------------------------------------
 # Step 1 – Runtime menu: Disable / Restore / Skip
 # -----------------------------------------------------------------------------
+Reset-AllProgress
 Clear-Host
 Write-Host ""
 Write-Host "========== STEP 1 - WINDOWS DEFENDER ==========" -ForegroundColor Green
 Write-Host ""
 Write-Host "Choose what to do with Windows Defender:" -ForegroundColor Yellow
-Write-Host "   1. DISABLE  Defender (apply policy DWORDs = 1, stop services)" -ForegroundColor White
-Write-Host "   2. RESTORE  Defender (delete the added DWORD values only)" -ForegroundColor White
-Write-Host "   3. SKIP     (leave Defender untouched)" -ForegroundColor White
+Write-Host ""
+Write-Host "   1) DISABLE  - write policy DWORDs = 1 and stop Defender services" -ForegroundColor White
+Write-Host "   2) RESTORE  - delete only the DWORD values added by this script" -ForegroundColor White
+Write-Host "   3) SKIP     - leave Windows Defender untouched" -ForegroundColor White
+Write-Host ""
+Write-Host "   Tip: use RESTORE only after you previously ran DISABLE." -ForegroundColor DarkGray
 Write-Host ""
 
 $defChoice = Read-Host "Enter 1, 2 or 3"
@@ -322,7 +336,8 @@ $ghostDevices = @(Get-PnpDevice | Where-Object { $_.Present -eq $false })
 if ($ghostDevices.Count -eq 0) {
     Write-SubProgress -Activity "Device Cleanup" -Status "No ghost devices found." -PercentComplete 75
 } else {
-    Complete-SubProgress -Activity "Device Cleanup"
+    # Kill the progress bars before writing the ghost list to the console.
+    Reset-AllProgress
     Write-Host ""
     Write-Host "  Ghost devices found:" -ForegroundColor Cyan
     foreach ($dev in $ghostDevices) {
@@ -622,7 +637,7 @@ Write-Host "  [5/5] CPU Optimization .......................... DONE" -Foregroun
 # =============================================================================
 # FINAL SUMMARY
 # =============================================================================
-Write-Progress -Id 0 -Activity "SIGMA PERFORMANCES - All Optimizations" -Completed
+Reset-AllProgress
 
 Write-Host ""
 Write-Host "========== SIGMA PERFORMANCES - SUMMARY ==========" -ForegroundColor Green
