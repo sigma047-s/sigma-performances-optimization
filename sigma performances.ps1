@@ -123,10 +123,6 @@ function Set-RegDword {
 
 # =============================================================================
 # FUNCTION 1 - DISABLE WINDOWS DEFENDER
-#   Creates the DWORDs you specified under:
-#     HKLM\SOFTWARE\Policies\Microsoft\Windows Defender
-#     \Real-Time Protection  \Signature Updates  \Spynet
-#   Then attempts to turn off Tamper Protection and stop/disable services.
 # =============================================================================
 function Disable-DefenderProtection {
     $defenderPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
@@ -196,8 +192,6 @@ function Disable-DefenderProtection {
 
 # =============================================================================
 # FUNCTION 2 - RESTORE WINDOWS DEFENDER
-#   ONLY deletes every DWORD value created by Disable-DefenderProtection.
-#   No services, no TamperProtection = 5, no signature refresh.
 # =============================================================================
 function Restore-DefenderProtection {
     $defenderPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
@@ -655,7 +649,7 @@ Write-Host "Have a good day!" -ForegroundColor Cyan
 Write-Host ""
 
 # =============================================================================
-# REBOOT PROMPT (single, at the end)
+# REBOOT PROMPT 
 # =============================================================================
 $rebootChoice = Read-Host "Press R to reboot now, or Q to quit"
 
