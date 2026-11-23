@@ -1,3 +1,6 @@
+
+sigma performances [ version 2 ] (.ps1).txt
+100 %
 #Requires -RunAsAdministrator
 
 # =============================================================================
@@ -9,13 +12,11 @@
 #   3. Telemetry Removal
 #   4. PowerCfg Registry
 #   5. CPU Optimization  (AC / DC)
-#   6. Windows Update    -> DISABLE AUTO or RESTORE (menu choice)
-#   7. Search Indexing   -> DISABLE or RESTORE (menu choice)
 #
 # Single 'Y' confirmation at start. Reboot prompt at end.
 # =============================================================================
 
-$script:TotalSteps  = 7
+$script:TotalSteps  = 5
 $script:CurrentStep = 0
 
 # -----------------------------------------------------------------------------
@@ -45,6 +46,10 @@ function Complete-SubProgress {
     Write-Progress -Id 1 -ParentId 0 -Activity $Activity -Completed
 }
 
+# -----------------------------------------------------------------------------
+# Kills any lingering progress bars so they can't overwrite console text.
+# Call this before every Clear-Host and before every Read-Host menu prompt.
+# -----------------------------------------------------------------------------
 function Reset-AllProgress {
     Write-Progress -Id 1 -ParentId 0 -Activity " " -Completed
     Write-Progress -Id 0 -Activity " " -Completed
@@ -64,8 +69,6 @@ Write-Host "   2. Device Cleanup    (Unknown + Ghost devices)" -ForegroundColor 
 Write-Host "   3. Telemetry & Tracking Removal" -ForegroundColor Yellow
 Write-Host "   4. PowerCfg Registry values" -ForegroundColor Yellow
 Write-Host "   5. CPU Optimization  (AC / DC)" -ForegroundColor Yellow
-Write-Host "   6. Windows Update    -> Disable Auto OR Restore (you choose at runtime)" -ForegroundColor Yellow
-Write-Host "   7. Search Indexing   -> Disable OR Restore (you choose at runtime)" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Make sure you have a System Restore point!" -ForegroundColor Red
 Write-Host ""
@@ -89,6 +92,9 @@ Write-OverallProgress -Status "Windows Defender" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_defender_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
+# -----------------------------------------------------------------------------
+# Helper: silently delete a value if it exists (logs failures)
+# -----------------------------------------------------------------------------
 function Remove-RegValue {
     param([string]$Path, [string]$Name)
     try {
@@ -104,6 +110,9 @@ function Remove-RegValue {
     }
 }
 
+# -----------------------------------------------------------------------------
+# Helper: silently write a DWORD (logs failures)
+# -----------------------------------------------------------------------------
 function Set-RegDword {
     param([string]$Path, [string]$Name, [int]$Value)
     try {
@@ -115,6 +124,9 @@ function Set-RegDword {
     }
 }
 
+# =============================================================================
+# FUNCTION 1 - DISABLE WINDOWS DEFENDER
+# =============================================================================
 function Disable-DefenderProtection {
     $defenderPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
     $rtpPolicy      = "$defenderPolicy\Real-Time Protection"
@@ -122,45 +134,68 @@ function Disable-DefenderProtection {
     $spynetPolicy   = "$defenderPolicy\Spynet"
     $featuresKey    = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
 
+    # --- Root DWORDs = 1 ---
     Write-SubProgress -Activity "Defender Disable" -Status "Creating Defender root DWORDs..." -PercentComplete 10
     $rootValues = @(
-        "DisableAntiSpyware","DisableRealtimeMonitoring","DisableAntiVirus",
-        "DisableSpecialRunningModes","DisableRoutinelyTackingAction","ServiceKeepAlive"
+        "DisableAntiSpyware",
+        "DisableRealtimeMonitoring",
+        "DisableAntiVirus",
+        "DisableSpecialRunningModes",
+        "DisableRoutinelyTackingAction",
+        "ServiceKeepAlive"
     )
     foreach ($v in $rootValues) { Set-RegDword -Path $defenderPolicy -Name $v -Value 1 }
 
+    # --- Real-Time Protection DWORDs = 1 ---
     Write-SubProgress -Activity "Defender Disable" -Status "Creating Real-Time Protection DWORDs..." -PercentComplete 25
     if (-not (Test-Path $rtpPolicy)) { New-Item -Path $rtpPolicy -Force | Out-Null }
-    $rtpValues = @("DisableBehaviorMonitoring","DisableOnAccesProtection","DisableRealtimeMonitoring","DisableScanOnRealtimeEnable")
+    $rtpValues = @(
+        "DisableBehaviorMonitoring",
+        "DisableOnAccesProtection",
+        "DisableRealtimeMonitoring",
+        "DisableScanOnRealtimeEnable"
+    )
     foreach ($v in $rtpValues) { Set-RegDword -Path $rtpPolicy -Name $v -Value 1 }
 
+    # --- Signature Updates DWORD = 1 ---
     Write-SubProgress -Activity "Defender Disable" -Status "Creating Signature Updates DWORD..." -PercentComplete 35
     if (-not (Test-Path $sigPolicy)) { New-Item -Path $sigPolicy -Force | Out-Null }
     Set-RegDword -Path $sigPolicy -Name "ForceUpdateFromMU" -Value 1
 
+    # --- Spynet DWORD = 1 ---
     Write-SubProgress -Activity "Defender Disable" -Status "Creating Spynet DWORD..." -PercentComplete 45
     if (-not (Test-Path $spynetPolicy)) { New-Item -Path $spynetPolicy -Force | Out-Null }
     Set-RegDword -Path $spynetPolicy -Name "DisableBlockAtFirstSeen" -Value 1
 
+    # --- Turn off Tamper Protection (best effort; may be blocked if ON) ---
     Write-SubProgress -Activity "Defender Disable" -Status "Turning off Tamper Protection..." -PercentComplete 60
     try {
         if (-not (Test-Path $featuresKey)) { New-Item -Path $featuresKey -Force | Out-Null }
-        New-ItemProperty -Path $featuresKey -Name "TamperProtection" -Value 4 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $featuresKey -Name "TamperProtection" `
+            -Value 4 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
         Set-RegDword -Path $defenderPolicy -Name "DisableTamperProtection" -Value 1
     }
-    catch { Add-Content -Path $errorLog -Value "TamperProtection(disable) : $($_.Exception.Message)" }
+    catch {
+        Add-Content -Path $errorLog -Value "TamperProtection(disable) : $($_.Exception.Message)"
+    }
 
+    # --- Stop & disable Defender services ---
     Write-SubProgress -Activity "Defender Disable" -Status "Stopping/disabling Defender services..." -PercentComplete 75
-    $services = @("WinDefend","WdNisSvc","Sense","SecurityHealthService","wscsvc")
+    $services = @("WinDefend", "WdNisSvc", "Sense", "SecurityHealthService", "wscsvc")
     foreach ($name in $services) {
         try {
             Stop-Service -Name $name -Force -ErrorAction SilentlyContinue 2>> $errorLog
             Set-Service  -Name $name -StartupType Disabled -ErrorAction Stop 2>> $errorLog
         }
-        catch { Add-Content -Path $errorLog -Value "$name : $($_.Exception.Message)" }
+        catch {
+            Add-Content -Path $errorLog -Value "$name : $($_.Exception.Message)"
+        }
     }
 }
 
+# =============================================================================
+# FUNCTION 2 - RESTORE WINDOWS DEFENDER
+# =============================================================================
 function Restore-DefenderProtection {
     $defenderPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender"
     $rtpPolicy      = "$defenderPolicy\Real-Time Protection"
@@ -168,27 +203,45 @@ function Restore-DefenderProtection {
     $spynetPolicy   = "$defenderPolicy\Spynet"
     $featuresKey    = "HKLM:\SOFTWARE\Microsoft\Windows Defender\Features"
 
+    # --- Root DWORDs ---
     Write-SubProgress -Activity "Defender Restore" -Status "Deleting Defender root DWORDs..." -PercentComplete 10
     $rootValues = @(
-        "DisableAntiSpyware","DisableRealtimeMonitoring","DisableAntiVirus",
-        "DisableSpecialRunningModes","DisableRoutinelyTackingAction","ServiceKeepAlive","DisableTamperProtection"
+        "DisableAntiSpyware",
+        "DisableRealtimeMonitoring",
+        "DisableAntiVirus",
+        "DisableSpecialRunningModes",
+        "DisableRoutinelyTackingAction",
+        "ServiceKeepAlive",
+        "DisableTamperProtection"
     )
     foreach ($v in $rootValues) { Remove-RegValue -Path $defenderPolicy -Name $v }
 
+    # --- Real-Time Protection DWORDs ---
     Write-SubProgress -Activity "Defender Restore" -Status "Deleting Real-Time Protection DWORDs..." -PercentComplete 40
-    $rtpValues = @("DisableBehaviorMonitoring","DisableOnAccesProtection","DisableRealtimeMonitoring","DisableScanOnRealtimeEnable")
+    $rtpValues = @(
+        "DisableBehaviorMonitoring",
+        "DisableOnAccesProtection",
+        "DisableRealtimeMonitoring",
+        "DisableScanOnRealtimeEnable"
+    )
     foreach ($v in $rtpValues) { Remove-RegValue -Path $rtpPolicy -Name $v }
 
+    # --- Signature Updates DWORD ---
     Write-SubProgress -Activity "Defender Restore" -Status "Deleting Signature Updates DWORD..." -PercentComplete 60
     foreach ($v in @("ForceUpdateFromMU")) { Remove-RegValue -Path $sigPolicy -Name $v }
 
+    # --- Spynet DWORD ---
     Write-SubProgress -Activity "Defender Restore" -Status "Deleting Spynet DWORD..." -PercentComplete 75
     foreach ($v in @("DisableBlockAtFirstSeen")) { Remove-RegValue -Path $spynetPolicy -Name $v }
 
+    # --- TamperProtection DWORD (added by disable) ---
     Write-SubProgress -Activity "Defender Restore" -Status "Deleting TamperProtection DWORD..." -PercentComplete 90
     Remove-RegValue -Path $featuresKey -Name "TamperProtection"
 }
 
+# -----------------------------------------------------------------------------
+# Step 1 – Runtime menu: Disable / Restore / Skip
+# -----------------------------------------------------------------------------
 Reset-AllProgress
 Clear-Host
 Write-Host ""
@@ -206,32 +259,43 @@ Write-Host ""
 $defChoice = Read-Host "Enter 1, 2 or 3"
 
 switch ($defChoice) {
+
     "1" {
         Write-Host ""
         Write-Host "[WARNING] Disabling Defender removes real-time protection." -ForegroundColor Red
         $verify = Read-Host "Type 'YES' to confirm DISABLE"
         if ($verify -eq "YES") {
             Disable-DefenderProtection
-            Write-Host "  [1/7] Windows Defender - DISABLED ............... OK" -ForegroundColor Green
+            Write-Host "  [1/5] Windows Defender - DISABLED ............... OK" -ForegroundColor Green
         } else {
             Write-Host "  Defender disable skipped (no confirmation)." -ForegroundColor Yellow
         }
     }
+
     "2" {
         Write-Host ""
         Write-Host "[INFO] Removing Defender DWORD values..." -ForegroundColor Cyan
         Restore-DefenderProtection
-        Write-Host "  [1/7] Windows Defender - RESTORED ............... OK" -ForegroundColor Green
+        Write-Host "  [1/5] Windows Defender - RESTORED ............... OK" -ForegroundColor Green
     }
-    "3" { Write-Host "  Defender step skipped." -ForegroundColor Yellow }
-    default { Write-Host "  Invalid choice. Defender step skipped." -ForegroundColor Yellow }
+
+    "3" {
+        Write-Host "  Defender step skipped." -ForegroundColor Yellow
+    }
+
+    default {
+        Write-Host "  Invalid choice. Defender step skipped." -ForegroundColor Yellow
+    }
 }
 
+# Error report
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
     if ($errorCount -gt 0) {
         Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
+    } else {
+        Remove-Item $errorLog -Force
+    }
 }
 
 Complete-SubProgress -Activity "Windows Defender"
@@ -246,6 +310,7 @@ Write-OverallProgress -Status "Device Cleanup" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_device_cleanup_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
+# --- 2a. Unknown devices (auto) ---
 Write-SubProgress -Activity "Device Cleanup" -Status "Searching for 'Unknown' status devices..." -PercentComplete 5
 $unknownDevices = @(Get-PnpDevice | Where-Object { $_.Status -eq 'Unknown' })
 
@@ -261,12 +326,14 @@ if ($unknownDevices.Count -eq 0) {
     }
 }
 
+# --- 2b. Ghost devices (with YES prompt - preserved from original) ---
 Write-SubProgress -Activity "Device Cleanup" -Status "Searching for non-present 'ghost' devices..." -PercentComplete 30
 $ghostDevices = @(Get-PnpDevice | Where-Object { $_.Present -eq $false })
 
 if ($ghostDevices.Count -eq 0) {
     Write-SubProgress -Activity "Device Cleanup" -Status "No ghost devices found." -PercentComplete 75
 } else {
+    # Kill the progress bars before writing the ghost list to the console.
     Reset-AllProgress
     Write-Host ""
     Write-Host "  Ghost devices found:" -ForegroundColor Cyan
@@ -290,19 +357,23 @@ if ($ghostDevices.Count -eq 0) {
     }
 }
 
+# --- 2c. Rescan for new hardware ---
 Write-SubProgress -Activity "Device Cleanup" -Status "Rescanning for hardware changes..." -PercentComplete 95
 pnputil /scan-devices 2>> $errorLog | Out-Null
 
+# Error report (preserved from original script)
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
     if ($errorCount -gt 0) {
         Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
+    } else {
+        Remove-Item $errorLog -Force
+    }
 }
 
 Complete-SubProgress -Activity "Device Cleanup"
 Write-OverallProgress -Status "Device Cleanup complete" -SubPercent 100
-Write-Host "  [2/7] Device Cleanup ............................ DONE" -ForegroundColor Green
+Write-Host "  [2/5] Device Cleanup ............................ DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 3 - TELEMETRY & TRACKING REMOVAL
@@ -313,6 +384,7 @@ Write-OverallProgress -Status "Telemetry & Tracking Removal" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_privacy_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
+# --- 3a. Telemetry Registry keys ---
 Write-SubProgress -Activity "Telemetry Removal" -Status "Removing Telemetry Registry keys..." -PercentComplete 5
 
 $telemetryRegPaths = @(
@@ -330,6 +402,7 @@ New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\PolicyManager\default\WiFi\Allo
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\WcmSvc\wifinetworkmanager\config" -Name "AutoConnectAllowedOEM" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
 New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" -Name "TailoredExperiencesWithDiagnosticDataEnabled" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
 
+# --- 3b. Telemetry services ---
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Telemetry Services..." -PercentComplete 30
 $telemetryServices = @("DiagTrack", "dmwappushservice")
 foreach ($service in $telemetryServices) {
@@ -337,6 +410,7 @@ foreach ($service in $telemetryServices) {
     Set-Service  $service -StartupType Disabled -ErrorAction SilentlyContinue 2>> $errorLog
 }
 
+# --- 3c. Telemetry scheduled tasks ---
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Telemetry Scheduled Tasks..." -PercentComplete 50
 $telemetryTasks = @(
     "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
@@ -351,10 +425,12 @@ foreach ($task in $telemetryTasks) {
     Disable-ScheduledTask -TaskPath (Split-Path $task -Parent) -TaskName (Split-Path $task -Leaf) -ErrorAction SilentlyContinue 2>> $errorLog
 }
 
+# --- 3d. Background App tasks (global) ---
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Background App Tasks (global)..." -PercentComplete 70
 New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Force -ErrorAction SilentlyContinue | Out-Null
 New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy" -Name "LetAppsRunInBackground" -Value 2 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
 
+# --- 3e. Windows Error Reporting ---
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Windows Error Reporting..." -PercentComplete 85
 New-Item -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Force -ErrorAction SilentlyContinue | Out-Null
 New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1 -PropertyType DWord -Force -ErrorAction SilentlyContinue | Out-Null
@@ -362,19 +438,23 @@ New-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting
 Set-Service  "WerSvc" -StartupType Disabled -ErrorAction SilentlyContinue 2>> $errorLog
 Stop-Service "WerSvc" -ErrorAction SilentlyContinue 2>> $errorLog
 
+# --- 3f. Task Scheduler history logging ---
 Write-SubProgress -Activity "Telemetry Removal" -Status "Disabling Task Scheduler history logging..." -PercentComplete 95
 wevtutil set-log "Microsoft-Windows-TaskScheduler/Operational" /enabled:false 2>> $errorLog
 
+# Error report
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
     if ($errorCount -gt 0) {
         Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
+    } else {
+        Remove-Item $errorLog -Force
+    }
 }
 
 Complete-SubProgress -Activity "Telemetry Removal"
 Write-OverallProgress -Status "Telemetry Removal complete" -SubPercent 100
-Write-Host "  [3/7] Telemetry & Tracking Removal .............. DONE" -ForegroundColor Green
+Write-Host "  [3/5] Telemetry & Tracking Removal .............. DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 4 - POWERCfg REGISTRY ONLY
@@ -385,13 +465,23 @@ Write-OverallProgress -Status "PowerCfg Registry" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_powercfg_registry_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
+# Helper (preserved from original script)
 function Set-RegistryValue {
-    param([string]$Path, [string]$Name, $Value, [string]$Type)
+    param(
+        [string]$Path,
+        [string]$Name,
+        $Value,
+        [string]$Type
+    )
     try {
-        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+        if (-not (Test-Path $Path)) {
+            New-Item -Path $Path -Force | Out-Null
+        }
         New-ItemProperty -Path $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
     }
-    catch { Add-Content -Path $errorLog -Value $_.Exception.Message }
+    catch {
+        Add-Content -Path $errorLog -Value $_.Exception.Message
+    }
 }
 
 $regPath    = 'HKCU:\Control Panel\PowerCfg'
@@ -405,29 +495,35 @@ $policiesHex = @'
 '@
 
 $policiesBytes = [byte[]](
-    $policiesHex -split ',' | ForEach-Object { [Convert]::ToByte($_.Trim(), 16) }
+    $policiesHex -split ',' |
+    ForEach-Object { [Convert]::ToByte($_.Trim(), 16) }
 )
 
 if ($policiesBytes.Count -ne 80) {
     Add-Content -Path $errorLog -Value "Policies hex parsed to $($policiesBytes.Count) bytes; expected 80."
 }
 
+# --- 4a. CurrentPowerPolicy = "4" ---
 Write-SubProgress -Activity "PowerCfg Registry" -Status "Writing CurrentPowerPolicy = '4'..." -PercentComplete 30
 Set-RegistryValue -Path $regPath -Name 'CurrentPowerPolicy' -Value '4' -Type String
 
+# --- 4b. GlobalPowerPolicy "Policies" hex ---
 Write-SubProgress -Activity "PowerCfg Registry" -Status "Writing GlobalPowerPolicy 'Policies' hex..." -PercentComplete 70
 Set-RegistryValue -Path $globalPath -Name 'Policies' -Value $policiesBytes -Type Binary
 
+# Error report
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
     if ($errorCount -gt 0) {
         Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
+    } else {
+        Remove-Item $errorLog -Force
+    }
 }
 
 Complete-SubProgress -Activity "PowerCfg Registry"
 Write-OverallProgress -Status "PowerCfg Registry complete" -SubPercent 100
-Write-Host "  [4/7] PowerCfg Registry ......................... DONE" -ForegroundColor Green
+Write-Host "  [4/5] PowerCfg Registry ......................... DONE" -ForegroundColor Green
 
 # =============================================================================
 # STEP 5 - CPU OPTIMIZATION (AC / DC)
@@ -438,12 +534,15 @@ Write-OverallProgress -Status "CPU Optimization" -SubPercent 0
 $errorLog = "$env:TEMP\sigma_optimization_errors.log"
 if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
 
+# Save current active power scheme GUID (preserved)
 $originalScheme = (powercfg -getactivescheme) -replace '.*\s([A-F0-9\-]{36}).*', '$1'
 
+# --- 5a. Activate Ultimate Performance power scheme ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Activating Ultimate Performance scheme..." -PercentComplete 3
 powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
 powercfg -setactive       e9a42b02-d5df-448d-aa00-03f14749eb61 2>> $errorLog
 
+# --- 5b. CPU / Processor settings ---
 $cpuSettings = @{
     "PROCTHROTTLEMIN"            = 100
     "PROCTHROTTLEMAX"            = 100
@@ -509,301 +608,28 @@ foreach ($key in $cpuKeys) {
     powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR $key $cpuSettings[$key] 2>> $errorLog
 }
 
+# --- 5c. Extra processor GUID ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Applying extra processor GUID..." -PercentComplete 98
 powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
 powercfg /setdcvalueindex SCHEME_CURRENT SUB_PROCESSOR 94d3a615-a899-4ac5-ae2b-e4d8f634367f 1 2>> $errorLog
 
+# --- 5d. Final commit ---
 Write-SubProgress -Activity "CPU Optimization" -Status "Committing power scheme..." -PercentComplete 99
 powercfg -setactive SCHEME_CURRENT 2>> $errorLog
 
+# Error report
 if (Test-Path $errorLog) {
     $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
     if ($errorCount -gt 0) {
         Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
+    } else {
+        Remove-Item $errorLog -Force
+    }
 }
 
 Complete-SubProgress -Activity "CPU Optimization"
 Write-OverallProgress -Status "CPU Optimization complete" -SubPercent 100
-Write-Host "  [5/7] CPU Optimization .......................... DONE" -ForegroundColor Green
-
-# =============================================================================
-# STEP 6 - WINDOWS UPDATE  (DISABLE AUTO  OR  RESTORE)
-# =============================================================================
-$script:CurrentStep = 6
-Write-OverallProgress -Status "Windows Update" -SubPercent 0
-
-$errorLog = "$env:TEMP\sigma_windows_update_errors.log"
-if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
-
-# Shared paths / lists used by Disable & Restore
-$wuPolicy    = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
-$wuAuPolicy  = "$wuPolicy\AU"
-$wuTaskPaths = @(
-    "\Microsoft\Windows\UpdateOrchestrator\",
-    "\Microsoft\Windows\WindowsUpdate\",
-    "\Microsoft\Windows\InstallService\"
-)
-$wuServices        = @("wuauserv", "UsoSvc", "BITS", "DoSvc", "WaaSMedicSvc")
-$wuServiceSnapshot = "$env:TEMP\sigma_wu_services_snapshot.json"
-
-# =============================================================================
-# FUNCTION - DISABLE WINDOWS UPDATE (auto only, manual still works)
-# =============================================================================
-function Disable-WindowsUpdateAuto {
-    Write-SubProgress -Activity "Windows Update Disable" -Status "Saving service startup snapshot..." -PercentComplete 5
-    try {
-        $snap = @{}
-        foreach ($svc in $wuServices) {
-            $wmi = Get-CimInstance Win32_Service -Filter "Name='$svc'" -ErrorAction SilentlyContinue
-            if ($wmi) { $snap[$svc] = $wmi.StartMode }
-        }
-        $snap | ConvertTo-Json | Set-Content -Path $wuServiceSnapshot -Force
-    }
-    catch { Add-Content -Path $errorLog -Value "Service snapshot : $($_.Exception.Message)" }
-
-    Write-SubProgress -Activity "Windows Update Disable" -Status "Writing NoAutoUpdate policy..." -PercentComplete 20
-    try {
-        if (-not (Test-Path $wuAuPolicy)) { New-Item -Path $wuAuPolicy -Force | Out-Null }
-        New-ItemProperty -Path $wuAuPolicy -Name "NoAutoUpdate" -Value 1 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-        New-ItemProperty -Path $wuAuPolicy -Name "AUOptions"    -Value 2 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
-    }
-    catch { Add-Content -Path $errorLog -Value "AU policy : $($_.Exception.Message)" }
-
-    Write-SubProgress -Activity "Windows Update Disable" -Status "Disabling UpdateOrchestrator tasks..." -PercentComplete 45
-    foreach ($path in $wuTaskPaths) {
-        try {
-            Get-ScheduledTask -TaskPath $path -ErrorAction SilentlyContinue |
-                Disable-ScheduledTask -ErrorAction SilentlyContinue 2>> $errorLog | Out-Null
-        }
-        catch { Add-Content -Path $errorLog -Value "Tasks($path) : $($_.Exception.Message)" }
-    }
-
-    Write-SubProgress -Activity "Windows Update Disable" -Status "Setting update services to Manual..." -PercentComplete 75
-    foreach ($svc in $wuServices) {
-        try {
-            if (Get-Service -Name $svc -ErrorAction SilentlyContinue) {
-                Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue 2>> $errorLog
-                Set-Service  -Name $svc -StartupType Manual -ErrorAction Stop 2>> $errorLog
-            }
-        }
-        catch { Add-Content -Path $errorLog -Value "$svc : $($_.Exception.Message)" }
-    }
-}
-
-# =============================================================================
-# FUNCTION - RESTORE WINDOWS UPDATE
-# =============================================================================
-function Restore-WindowsUpdateAuto {
-    Write-SubProgress -Activity "Windows Update Restore" -Status "Removing NoAutoUpdate / AUOptions..." -PercentComplete 20
-    foreach ($v in @("NoAutoUpdate", "AUOptions")) {
-        Remove-RegValue -Path $wuAuPolicy -Name $v
-    }
-
-    Write-SubProgress -Activity "Windows Update Restore" -Status "Re-enabling update tasks..." -PercentComplete 50
-    foreach ($path in $wuTaskPaths) {
-        try {
-            Get-ScheduledTask -TaskPath $path -ErrorAction SilentlyContinue |
-                Enable-ScheduledTask -ErrorAction SilentlyContinue 2>> $errorLog | Out-Null
-        }
-        catch { Add-Content -Path $errorLog -Value "Tasks($path) : $($_.Exception.Message)" }
-    }
-
-    Write-SubProgress -Activity "Windows Update Restore" -Status "Restoring service startup types..." -PercentComplete 80
-    $snap = @{}
-    if (Test-Path $wuServiceSnapshot) {
-        try { $snap = Get-Content $wuServiceSnapshot -Raw | ConvertFrom-Json } catch { $snap = @{} }
-    }
-    $defaults = @{
-        "wuauserv"     = "Manual"
-        "UsoSvc"       = "Automatic"
-        "BITS"         = "Manual"
-        "DoSvc"        = "Automatic"
-        "WaaSMedicSvc" = "Manual"
-    }
-    foreach ($svc in $wuServices) {
-        if (-not (Get-Service -Name $svc -ErrorAction SilentlyContinue)) { continue }
-        $target = $null
-        if ($snap.PSObject.Properties.Name -contains $svc) { $target = $snap.$svc }
-        elseif ($defaults.ContainsKey($svc))              { $target = $defaults[$svc] }
-        if (-not $target) { continue }
-
-        switch ($target) {
-            "Auto"     { $target = "Automatic" }
-            "Manual"   { $target = "Manual" }
-            "Disabled" { $target = "Disabled" }
-        }
-        try {
-            Set-Service -Name $svc -StartupType $target -ErrorAction Stop 2>> $errorLog
-            if ($svc -in @("wuauserv", "UsoSvc", "BITS")) {
-                Start-Service -Name $svc -ErrorAction SilentlyContinue 2>> $errorLog
-            }
-        }
-        catch { Add-Content -Path $errorLog -Value "$svc : $($_.Exception.Message)" }
-    }
-}
-
-# -----------------------------------------------------------------------------
-# Step 6 – Runtime menu: Disable Auto / Restore / Skip
-# -----------------------------------------------------------------------------
-Reset-AllProgress
-Clear-Host
-Write-Host ""
-Write-Host "========== STEP 6 - WINDOWS UPDATE ==========" -ForegroundColor Green
-Write-Host ""
-Write-Host "Choose what to do with Windows Update:" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "   1) DISABLE AUTO  - NoAutoUpdate=1, disable WU tasks, services -> Manual" -ForegroundColor White
-Write-Host "   2) RESTORE       - undo the changes above (policy, tasks, services)" -ForegroundColor White
-Write-Host "   3) SKIP          - leave Windows Update untouched" -ForegroundColor White
-Write-Host ""
-Write-Host "   Tip: services are set to Manual (not Disabled), so 'Check for updates'" -ForegroundColor DarkGray
-Write-Host "        in Settings still works for manual installs after DISABLE AUTO." -ForegroundColor DarkGray
-Write-Host ""
-
-$wuChoice = Read-Host "Enter 1, 2 or 3"
-
-switch ($wuChoice) {
-    "1" {
-        Write-Host ""
-        Write-Host "[WARNING] Automatic updates will be blocked (manual install still works)." -ForegroundColor Red
-        $verify = Read-Host "Type 'YES' to confirm DISABLE AUTO"
-        if ($verify -eq "YES") {
-            Disable-WindowsUpdateAuto
-            Write-Host "  [6/7] Windows Update - AUTO DISABLED ............ OK" -ForegroundColor Green
-        } else {
-            Write-Host "  Windows Update disable skipped (no confirmation)." -ForegroundColor Yellow
-        }
-    }
-    "2" {
-        Write-Host ""
-        Write-Host "[INFO] Restoring Windows Update..." -ForegroundColor Cyan
-        Restore-WindowsUpdateAuto
-        Write-Host "  [6/7] Windows Update - RESTORED ................. OK" -ForegroundColor Green
-    }
-    "3" { Write-Host "  Windows Update step skipped." -ForegroundColor Yellow }
-    default { Write-Host "  Invalid choice. Windows Update step skipped." -ForegroundColor Yellow }
-}
-
-if (Test-Path $errorLog) {
-    $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
-}
-
-Complete-SubProgress -Activity "Windows Update"
-Write-OverallProgress -Status "Windows Update step complete" -SubPercent 100
-
-# =============================================================================
-# STEP 7 - SEARCH INDEXING  (DISABLE  OR  RESTORE)
-# =============================================================================
-$script:CurrentStep = 7
-Write-OverallProgress -Status "Search Indexing" -SubPercent 0
-
-$errorLog = "$env:TEMP\sigma_search_index_errors.log"
-if (Test-Path $errorLog) { Remove-Item $errorLog -Force }
-
-$searchSnapshot = "$env:TEMP\sigma_search_service_snapshot.json"
-
-# =============================================================================
-# FUNCTION - DISABLE SEARCH INDEXING
-# =============================================================================
-function Disable-SearchIndexing {
-    Write-SubProgress -Activity "Search Indexing Disable" -Status "Saving WSearch service snapshot..." -PercentComplete 10
-    try {
-        $svc = Get-CimInstance Win32_Service -Filter "Name='WSearch'" -ErrorAction SilentlyContinue
-        if ($svc) {
-            @{ WSearch = $svc.StartMode } | ConvertTo-Json | Set-Content -Path $searchSnapshot -Force
-        }
-    }
-    catch { Add-Content -Path $errorLog -Value "Snapshot : $($_.Exception.Message)" }
-
-    Write-SubProgress -Activity "Search Indexing Disable" -Status "Stopping and disabling WSearch service..." -PercentComplete 50
-    try {
-        Stop-Service -Name "WSearch" -Force -ErrorAction SilentlyContinue 2>> $errorLog
-        Set-Service  -Name "WSearch" -StartupType Disabled -ErrorAction Stop 2>> $errorLog
-    }
-    catch { Add-Content -Path $errorLog -Value "WSearch : $($_.Exception.Message)" }
-}
-
-# =============================================================================
-# FUNCTION - RESTORE SEARCH INDEXING
-# =============================================================================
-function Restore-SearchIndexing {
-    Write-SubProgress -Activity "Search Indexing Restore" -Status "Restoring WSearch service..." -PercentComplete 30
-
-    $target = "Automatic"
-    if (Test-Path $searchSnapshot) {
-        try {
-            $snap = Get-Content $searchSnapshot -Raw | ConvertFrom-Json
-            if ($snap.WSearch) {
-                switch ($snap.WSearch) {
-                    "Auto"     { $target = "Automatic" }
-                    "Manual"   { $target = "Manual" }
-                    "Disabled" { $target = "Manual" }
-                }
-            }
-        } catch { }
-    }
-
-    try {
-        Set-Service -Name "WSearch" -StartupType $target -ErrorAction Stop 2>> $errorLog
-        Start-Service -Name "WSearch" -ErrorAction SilentlyContinue 2>> $errorLog
-    }
-    catch { Add-Content -Path $errorLog -Value "WSearch restore : $($_.Exception.Message)" }
-}
-
-# -----------------------------------------------------------------------------
-# Step 7 – Runtime menu: Disable / Restore / Skip
-# -----------------------------------------------------------------------------
-Reset-AllProgress
-Clear-Host
-Write-Host ""
-Write-Host "========== STEP 7 - SEARCH INDEXING ==========" -ForegroundColor Green
-Write-Host ""
-Write-Host "Choose what to do with Windows Search Indexing:" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "   1) DISABLE  - stop and disable the WSearch service (no indexing)" -ForegroundColor White
-Write-Host "   2) RESTORE  - set WSearch back to its original startup type and start it" -ForegroundColor White
-Write-Host "   3) SKIP     - leave Search Indexing untouched" -ForegroundColor White
-Write-Host ""
-Write-Host "   Tip: use RESTORE only after you previously ran DISABLE." -ForegroundColor DarkGray
-Write-Host ""
-
-$searchChoice = Read-Host "Enter 1, 2 or 3"
-
-switch ($searchChoice) {
-    "1" {
-        Write-Host ""
-        Write-Host "[WARNING] Disabling search indexing will slow down file searches." -ForegroundColor Red
-        $verify = Read-Host "Type 'YES' to confirm DISABLE"
-        if ($verify -eq "YES") {
-            Disable-SearchIndexing
-            Write-Host "  [7/7] Search Indexing - DISABLED ................ OK" -ForegroundColor Green
-        } else {
-            Write-Host "  Search Indexing disable skipped (no confirmation)." -ForegroundColor Yellow
-        }
-    }
-    "2" {
-        Write-Host ""
-        Write-Host "[INFO] Restoring Search Indexing..." -ForegroundColor Cyan
-        Restore-SearchIndexing
-        Write-Host "  [7/7] Search Indexing - RESTORED ................ OK" -ForegroundColor Green
-    }
-    "3" { Write-Host "  Search Indexing step skipped." -ForegroundColor Yellow }
-    default { Write-Host "  Invalid choice. Search Indexing step skipped." -ForegroundColor Yellow }
-}
-
-if (Test-Path $errorLog) {
-    $errorCount = (Get-Content $errorLog | Measure-Object -Line).Lines
-    if ($errorCount -gt 0) {
-        Write-Host "  [WARNING] $errorCount errors occurred. Check log: $errorLog" -ForegroundColor Yellow
-    } else { Remove-Item $errorLog -Force }
-}
-
-Complete-SubProgress -Activity "Search Indexing"
-Write-OverallProgress -Status "Search Indexing complete" -SubPercent 100
+Write-Host "  [5/5] CPU Optimization .......................... DONE" -ForegroundColor Green
 
 # =============================================================================
 # FINAL SUMMARY
@@ -812,13 +638,11 @@ Reset-AllProgress
 
 Write-Host ""
 Write-Host "========== SIGMA PERFORMANCES - SUMMARY ==========" -ForegroundColor Green
-Write-Host "   [1/7] Windows Defender (disable / restore) ...... OK" -ForegroundColor Green
-Write-Host "   [2/7] Device Cleanup ............................ OK" -ForegroundColor Green
-Write-Host "   [3/7] Telemetry & Tracking Removal .............. OK" -ForegroundColor Green
-Write-Host "   [4/7] PowerCfg Registry ......................... OK" -ForegroundColor Green
-Write-Host "   [5/7] CPU Optimization .......................... OK" -ForegroundColor Green
-Write-Host "   [6/7] Windows Update (disable auto / restore) ... OK" -ForegroundColor Green
-Write-Host "   [7/7] Search Indexing (disable / restore) ....... OK" -ForegroundColor Green
+Write-Host "   [1/5] Windows Defender (disable / restore) ...... OK" -ForegroundColor Green
+Write-Host "   [2/5] Device Cleanup ............................ OK" -ForegroundColor Green
+Write-Host "   [3/5] Telemetry & Tracking Removal .............. OK" -ForegroundColor Green
+Write-Host "   [4/5] PowerCfg Registry ......................... OK" -ForegroundColor Green
+Write-Host "   [5/5] CPU Optimization .......................... OK" -ForegroundColor Green
 Write-Host ""
 Write-Host "[SUCCESS] All optimizations applied." -ForegroundColor Green
 Write-Host "[INFO] System reboot required." -ForegroundColor Yellow
@@ -828,7 +652,7 @@ Write-Host "Have a good day!" -ForegroundColor Cyan
 Write-Host ""
 
 # =============================================================================
-# REBOOT PROMPT
+# REBOOT PROMPT 
 # =============================================================================
 $rebootChoice = Read-Host "Press R to reboot now, or Q to quit"
 
@@ -837,3 +661,4 @@ if ($rebootChoice -eq "R" -or $rebootChoice -eq "r") {
 } else {
     exit 0
 }
+Affichage de sigma performances [ version 3 ] (.ps1).txt
