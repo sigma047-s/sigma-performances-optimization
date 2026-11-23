@@ -1,6 +1,3 @@
-
-sigma performances [ version 2 ] (.ps1).txt
-100 %
 #Requires -RunAsAdministrator
 
 # =============================================================================
@@ -661,4 +658,3 @@ if ($rebootChoice -eq "R" -or $rebootChoice -eq "r") {
 } else {
     exit 0
 }
-Affichage de sigma performances [ version 3 ] (.ps1).txt
